@@ -1,4 +1,22 @@
-# kinetis/mcp
+<p align="center">
+  <img src="logo.svg" alt="Kinetis" width="420">
+</p>
+
+<p align="center">
+  <strong>kinetis/mcp</strong>
+  <br>
+  <strong>The native Model Context Protocol server for Kinetis</strong>
+</p>
+
+<p align="center">
+  <a href="https://packagist.org/packages/kinetis/mcp"><img src="https://img.shields.io/packagist/v/kinetis/mcp?label=version" alt="Packagist Version"></a>
+  <a href="https://packagist.org/packages/kinetis/mcp"><img src="https://img.shields.io/packagist/dt/kinetis/mcp" alt="Packagist Downloads"></a>
+  <a href="https://packagist.org/packages/kinetis/mcp"><img src="https://img.shields.io/packagist/php-v/kinetis/mcp" alt="PHP Version"></a>
+  <a href="https://packagist.org/packages/kinetis/mcp"><img src="https://img.shields.io/packagist/l/kinetis/mcp" alt="License"></a>
+  <a href="https://github.com/kinetis-dev/kinetis/actions/workflows/ci.yml"><img src="https://github.com/kinetis-dev/kinetis/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
+---
 
 The [Model Context Protocol](https://modelcontextprotocol.io) server for
 [Kinetis](https://github.com/kinetis-dev/kinetis) — tools and resources
