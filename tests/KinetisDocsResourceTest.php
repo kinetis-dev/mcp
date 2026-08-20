@@ -16,7 +16,19 @@ use ReflectionClass;
 
 final class KinetisDocsResourceTest extends TestCase
 {
-    private const string FIXTURE_HOST = '127.0.0.1:8097';
+    // 8100, not 8097: bref-adapter's ProtocolBoundaryEndToEndTest already
+    // binds 127.0.0.1:8097 for its own `php -S` fixture. sonarqube.yml's
+    // coverage step runs up to four packages' suites concurrently over
+    // --network host, a single shared loopback namespace — a real
+    // collision between these two exact files is what caused
+    // test_falls_back_to_a_remote_fetch_when_the_local_path_is_missing to
+    // fail there: this suite's readiness check connected successfully to
+    // a real listener on 8097, just the wrong one (bref-adapter's fake
+    // Lambda Runtime API), whose response to GET /known-remote-page.md is
+    // never a 2xx. Every `php -S` fixture host across the repo, as of
+    // this fix: bref-adapter 8096/8097, revolt-http-client 8098/8099,
+    // this file 8100 — pick a port outside that set for a new one.
+    private const string FIXTURE_HOST = '127.0.0.1:8100';
 
     /** @var resource */
     private static $fixtureServerProcess;
