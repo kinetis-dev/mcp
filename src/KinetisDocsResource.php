@@ -143,10 +143,22 @@ final readonly class KinetisDocsResource
         return $this->read('query-builder');
     }
 
-    #[McpResource(uri: 'kinetis://docs/queue', name: 'queue', description: 'kinetis/queue: a backend-agnostic background job queue — Redis and SQL backends included', mimeType: self::MIME_TYPE)]
+    #[McpResource(uri: 'kinetis://docs/queue', name: 'queue', description: 'kinetis/queue: a backend-agnostic background job queue — every backend lives in its own separate package', mimeType: self::MIME_TYPE)]
     public function queue(): string
     {
         return $this->read('queue');
+    }
+
+    #[McpResource(uri: 'kinetis://docs/queue-redis', name: 'queue-redis', description: 'kinetis/queue-redis: a Redis backend for kinetis/queue\'s QueueInterface', mimeType: self::MIME_TYPE)]
+    public function queueRedis(): string
+    {
+        return $this->read('queue-redis');
+    }
+
+    #[McpResource(uri: 'kinetis://docs/queue-sql', name: 'queue-sql', description: 'kinetis/queue-sql: a MySQL/Postgres backend for kinetis/queue\'s QueueInterface', mimeType: self::MIME_TYPE)]
+    public function queueSql(): string
+    {
+        return $this->read('queue-sql');
     }
 
     #[McpResource(uri: 'kinetis://docs/queue-sqs', name: 'queue-sqs', description: 'kinetis/queue-sqs: an Amazon SQS backend for kinetis/queue\'s QueueInterface', mimeType: self::MIME_TYPE)]
