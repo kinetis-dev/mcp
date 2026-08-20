@@ -51,7 +51,7 @@ the identity they resolve reaches the tool.
 Installing this package is what opts it in — it registers the following
 automatically, through the `extra.kinetis` declaration in its
 `composer.json` (see
-[docs.kinetis.dev/cli.html](https://docs.kinetis.dev/cli.html)):
+[kinetis.dev/docs/cli.html](https://kinetis.dev/docs/cli.html)):
 
 - **A command** on `vendor/bin/kinetis`: `mcp:serve`, the stdio
   transport.
@@ -80,7 +80,7 @@ composer require kinetis/mcp
 ```
 
 Requires PHP 8.4 or later. Documentation:
-[docs.kinetis.dev/mcp.html](https://docs.kinetis.dev/mcp.html)
+[kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html)
 
 ## License
 
