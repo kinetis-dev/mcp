@@ -31,16 +31,42 @@ final class KinetisDocsResourceTest extends TestCase
             $pipes,
         );
 
-        // No fixed readiness signal from `php -S` other than "give it a
-        // moment" — the same discipline AmpHttpClientFactoryTest's own
-        // fixture server already uses.
-        usleep(300_000);
+        self::waitForServerReady(self::FIXTURE_HOST);
     }
 
     public static function tearDownAfterClass(): void
     {
         proc_terminate(self::$fixtureServerProcess);
         proc_close(self::$fixtureServerProcess);
+    }
+
+    /**
+     * `php -S` gives no fixed readiness signal of its own — a real TCP
+     * connect attempt, polled with a bounded deadline, in place of a
+     * fixed sleep that raced the server's own startup and lost on a
+     * slower or more loaded runner (confirmed: this is what actually
+     * failed test_falls_back_to_a_remote_fetch_when_the_local_path_is_missing
+     * under SonarQube Cloud's PCOV-instrumented coverage run — a genuine
+     * connection failure against a server that hadn't started listening
+     * yet, not a bug in the fallback logic under test).
+     */
+    private static function waitForServerReady(string $host): void
+    {
+        $deadline = microtime(true) + 5.0;
+
+        while (microtime(true) < $deadline) {
+            $socket = @stream_socket_client("tcp://{$host}", timeout: 0.1);
+
+            if ($socket !== false) {
+                fclose($socket);
+
+                return;
+            }
+
+            usleep(20_000);
+        }
+
+        self::fail("The fixture server at {$host} never started accepting connections.");
     }
 
     private function server(): McpServer
