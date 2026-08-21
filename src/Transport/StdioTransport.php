@@ -31,11 +31,10 @@ final class StdioTransport
      * RequestScope per line, the standard rollback hook, disposal once
      * the response is written, and a gc_collect_cycles() — a stdio
      * server is a persistent process by definition, the same reasoning
-     * QueueWorker applies per job. A tool that stashed state on the
-     * scope of one call no longer sees it on the next; that state only
-     * ever survived by accident of the previous single shared scope.
-     * Omitted, messages share the dispatcher's own container, which is
-     * not per-message-scoped.
+     * QueueWorker applies per job. A tool that stashes state on the
+     * scope of one call never sees it on the next — each message gets
+     * its own scope. Omitted, messages share the dispatcher's own
+     * container, which is not per-message-scoped.
      *
      * @param resource $input
      * @param resource $output
