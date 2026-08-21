@@ -107,7 +107,7 @@ final readonly class KinetisDocsResource
         return $this->read('logging');
     }
 
-    #[McpResource(uri: 'kinetis://docs/runtime-adapters', name: 'runtime-adapters', description: 'FrankenPHP, PHP-FPM, and AWS Lambda adapters, and how RuntimeDetector picks one', mimeType: self::MIME_TYPE)]
+    #[McpResource(uri: 'kinetis://docs/runtime-adapters', name: 'runtime-adapters', description: 'FrankenPHP, PHP-FPM, AWS Lambda, and RoadRunner adapters, and how RuntimeDetector picks one', mimeType: self::MIME_TYPE)]
     public function runtimeAdapters(): string
     {
         return $this->read('runtime-adapters');
