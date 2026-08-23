@@ -1,0 +1,7 @@
+{
+    "autoload": {
+        "psr-4": {
+            "Kinetis\\Mcp\\Tests\\Fixtures\\Project\\": ""
+        }
+    }
+}

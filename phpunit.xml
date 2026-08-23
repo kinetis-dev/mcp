@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache">
+    <testsuites>
+        <testsuite name="Kinetis\Mcp">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <!--
+            Tests that assert a misconfiguration is refused go through
+            ExceptionHandlerMiddleware, which logs via error_log() —
+            writing to STDERR by default. Infection stops a test process
+            the instant it sees a byte on STDERR, so its baseline run
+            fails at whichever test happens to run first. Scoped to this
+            run only: a consumer's own error_log() destination is theirs
+            to set, and no test asserts on what is written here.
+        -->
+        <ini name="error_log" value="/dev/null"/>
+    </php>
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>
