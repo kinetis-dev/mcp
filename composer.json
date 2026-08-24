@@ -38,7 +38,8 @@
     "extra": {
         "kinetis": {
             "scan": "Kinetis\\Mcp\\",
-            "bootstrap": "Kinetis\\Mcp\\PackageBootstrap"
+            "bootstrap": "Kinetis\\Mcp\\PackageBootstrap",
+            "discovery": "Kinetis\\Mcp\\McpRegistry"
         }
     },
     "repositories": [
