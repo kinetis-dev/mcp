@@ -209,6 +209,12 @@ final readonly class KinetisDocsResource
         return $this->read('auth');
     }
 
+    #[McpResource(uri: 'kinetis://docs/authorization', name: 'authorization', description: 'kinetis/authorization: unopinionated ability-based authorization — Gate wraps any callable Policy check', mimeType: self::MIME_TYPE)]
+    public function authorization(): string
+    {
+        return $this->read('authorization');
+    }
+
     #[McpResource(uri: 'kinetis://docs/auth-jwt', name: 'auth-jwt', description: 'kinetis/auth-jwt: stateless JWT authentication (HS256/RS256), with optional per-token revocation', mimeType: self::MIME_TYPE)]
     public function authJwt(): string
     {
