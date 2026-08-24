@@ -191,6 +191,12 @@ final readonly class KinetisDocsResource
         return $this->read('mailer');
     }
 
+    #[McpResource(uri: 'kinetis://docs/broadcasting', name: 'broadcasting', description: 'kinetis/broadcasting: real-time broadcasting over the Pusher Channels protocol (Soketi/Reverb/Pusher), attribute-based private/presence channel authorization', mimeType: self::MIME_TYPE)]
+    public function broadcasting(): string
+    {
+        return $this->read('broadcasting');
+    }
+
     #[McpResource(uri: 'kinetis://docs/search-opensearch', name: 'search-opensearch', description: 'kinetis/search-opensearch: OpenSearch client construction, non-blocking via kinetis/revolt-http-client', mimeType: self::MIME_TYPE)]
     public function searchOpenSearch(): string
     {
