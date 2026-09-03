@@ -50,6 +50,10 @@ use ReflectionMethod;
  */
 final class McpRegistry implements CacheableDiscoveryInterface
 {
+    private const string TOOL_ARTIFACT_COMPONENT = 'McpRegistry tool';
+
+    private const string RESOURCE_ARTIFACT_COMPONENT = 'McpRegistry resource';
+
     /** @var list<ToolDefinition> */
     private array $tools = [];
 
@@ -311,12 +315,12 @@ final class McpRegistry implements CacheableDiscoveryInterface
         $seenToolNames = [];
 
         foreach ($tools as $tool) {
-            ArtifactValidation::exactKeys($tool, 'McpRegistry tool', ['name', 'description', 'controllerClass', 'controllerMethod', 'inputSchema', 'inputSchemaObjectPaths']);
+            ArtifactValidation::exactKeys($tool, self::TOOL_ARTIFACT_COMPONENT, ['name', 'description', 'controllerClass', 'controllerMethod', 'inputSchema', 'inputSchemaObjectPaths']);
 
-            $name = ArtifactValidation::string($tool, 'McpRegistry tool', 'name');
-            $inputSchema = ArtifactValidation::array($tool, 'McpRegistry tool', 'inputSchema');
+            $name = ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'name');
+            $inputSchema = ArtifactValidation::array($tool, self::TOOL_ARTIFACT_COMPONENT, 'inputSchema');
             $objectPaths = self::extractObjectPaths($tool);
-            $controllerClass = ArtifactValidation::string($tool, 'McpRegistry tool', 'controllerClass');
+            $controllerClass = ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'controllerClass');
 
             if (isset($seenToolNames[$name])) {
                 throw InvalidCacheArtifactException::malformedEntry('McpRegistry', "duplicate tool name \"{$name}\"");
@@ -326,9 +330,9 @@ final class McpRegistry implements CacheableDiscoveryInterface
 
             $registry->tools[] = new ToolDefinition(
                 name: $name,
-                description: ArtifactValidation::string($tool, 'McpRegistry tool', 'description'),
+                description: ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'description'),
                 controllerClass: $controllerClass,
-                controllerMethod: ArtifactValidation::string($tool, 'McpRegistry tool', 'controllerMethod'),
+                controllerMethod: ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'controllerMethod'),
                 inputSchema: self::restoreSchemaFromStorage($inputSchema, $objectPaths),
             );
 
@@ -340,10 +344,10 @@ final class McpRegistry implements CacheableDiscoveryInterface
         $seenResourceUris = [];
 
         foreach ($resources as $resource) {
-            ArtifactValidation::exactKeys($resource, 'McpRegistry resource', ['uri', 'name', 'description', 'mimeType', 'controllerClass', 'controllerMethod']);
+            ArtifactValidation::exactKeys($resource, self::RESOURCE_ARTIFACT_COMPONENT, ['uri', 'name', 'description', 'mimeType', 'controllerClass', 'controllerMethod']);
 
-            $uri = ArtifactValidation::string($resource, 'McpRegistry resource', 'uri');
-            $controllerClass = ArtifactValidation::string($resource, 'McpRegistry resource', 'controllerClass');
+            $uri = ArtifactValidation::string($resource, self::RESOURCE_ARTIFACT_COMPONENT, 'uri');
+            $controllerClass = ArtifactValidation::string($resource, self::RESOURCE_ARTIFACT_COMPONENT, 'controllerClass');
 
             if (isset($seenResourceUris[$uri])) {
                 throw InvalidCacheArtifactException::malformedEntry('McpRegistry', "duplicate resource uri \"{$uri}\"");
@@ -353,11 +357,11 @@ final class McpRegistry implements CacheableDiscoveryInterface
 
             $registry->resources[] = new ResourceDefinition(
                 uri: $uri,
-                name: ArtifactValidation::string($resource, 'McpRegistry resource', 'name'),
-                description: ArtifactValidation::string($resource, 'McpRegistry resource', 'description'),
-                mimeType: ArtifactValidation::string($resource, 'McpRegistry resource', 'mimeType'),
+                name: ArtifactValidation::string($resource, self::RESOURCE_ARTIFACT_COMPONENT, 'name'),
+                description: ArtifactValidation::string($resource, self::RESOURCE_ARTIFACT_COMPONENT, 'description'),
+                mimeType: ArtifactValidation::string($resource, self::RESOURCE_ARTIFACT_COMPONENT, 'mimeType'),
                 controllerClass: $controllerClass,
-                controllerMethod: ArtifactValidation::string($resource, 'McpRegistry resource', 'controllerMethod'),
+                controllerMethod: ArtifactValidation::string($resource, self::RESOURCE_ARTIFACT_COMPONENT, 'controllerMethod'),
             );
 
             /** @var class-string $controllerClass */
@@ -465,13 +469,13 @@ final class McpRegistry implements CacheableDiscoveryInterface
             // return type, guarantee it — so a recorded path can never
             // legitimately be empty; only a hand-edited or otherwise
             // corrupt artifact reaches this.
-            throw InvalidCacheArtifactException::malformedEntry('McpRegistry tool', 'an "inputSchemaObjectPaths" entry with no path segments');
+            throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'an "inputSchemaObjectPaths" entry with no path segments');
         }
 
         $key = array_shift($path);
 
         if (!array_key_exists($key, $data) || !is_array($data[$key])) {
-            throw InvalidCacheArtifactException::malformedEntry('McpRegistry tool', 'an "inputSchemaObjectPaths" entry that does not resolve to a real array node');
+            throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'an "inputSchemaObjectPaths" entry that does not resolve to a real array node');
         }
 
         if ($path === []) {
@@ -492,22 +496,22 @@ final class McpRegistry implements CacheableDiscoveryInterface
      */
     private static function extractObjectPaths(array $tool): array
     {
-        $value = ArtifactValidation::array($tool, 'McpRegistry tool', 'inputSchemaObjectPaths');
+        $value = ArtifactValidation::array($tool, self::TOOL_ARTIFACT_COMPONENT, 'inputSchemaObjectPaths');
 
         if (!array_is_list($value)) {
-            throw InvalidCacheArtifactException::wrongFieldType('McpRegistry tool', 'inputSchemaObjectPaths', 'a list');
+            throw InvalidCacheArtifactException::wrongFieldType(self::TOOL_ARTIFACT_COMPONENT, 'inputSchemaObjectPaths', 'a list');
         }
 
         $paths = [];
 
         foreach ($value as $path) {
             if (!is_array($path) || !array_is_list($path)) {
-                throw InvalidCacheArtifactException::malformedEntry('McpRegistry tool', 'a non-list entry in "inputSchemaObjectPaths"');
+                throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'a non-list entry in "inputSchemaObjectPaths"');
             }
 
             foreach ($path as $segment) {
                 if (!is_string($segment)) {
-                    throw InvalidCacheArtifactException::malformedEntry('McpRegistry tool', 'a non-string path segment in "inputSchemaObjectPaths"');
+                    throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'a non-string path segment in "inputSchemaObjectPaths"');
                 }
             }
 

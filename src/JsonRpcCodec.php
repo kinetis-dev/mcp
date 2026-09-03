@@ -40,6 +40,7 @@ use stdClass;
  */
 final class JsonRpcCodec
 {
+    // Never instantiated — every method here is static.
     private function __construct() {}
 
     /**

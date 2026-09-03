@@ -7,6 +7,7 @@ namespace Kinetis\Mcp\Tests;
 use Kinetis\Cache\CacheableDiscoveryInterface;
 use Kinetis\Cache\CacheFormat;
 use Kinetis\Cache\Exception\CacheArtifactExceptionInterface;
+use Kinetis\Cache\Exception\InvalidCacheArtifactException;
 use Kinetis\Cache\CacheStore;
 use Kinetis\Cache\CommandCache;
 use Kinetis\Cache\CompiledCache;
@@ -405,6 +406,54 @@ final class McpRegistryTest extends TestCase
         ]);
     }
 
+    /**
+     * Every required field present, plus one unexpected extra key — the
+     * exactKeys() check exists specifically to catch this, since
+     * reading each field individually afterward would otherwise let a
+     * stray/corrupt key through silently.
+     */
+    public function test_from_array_rejects_a_tool_with_an_unexpected_extra_field(): void
+    {
+        $this->expectException(InvalidCacheArtifactException::class);
+        $this->expectExceptionMessage(
+            'A compiled "McpRegistry tool" artifact has a malformed entry (an unexpected or missing field) — the cache is stale or corrupt.',
+        );
+
+        McpRegistry::fromArray([
+            'tools' => [[
+                'name' => 'ping',
+                'description' => '',
+                'controllerClass' => 'App\\C',
+                'controllerMethod' => 'ping',
+                'inputSchema' => ['type' => 'object'],
+                'inputSchemaObjectPaths' => [],
+                'bogus' => 'unexpected',
+            ]],
+            'resources' => [],
+        ]);
+    }
+
+    public function test_from_array_rejects_a_resource_with_an_unexpected_extra_field(): void
+    {
+        $this->expectException(InvalidCacheArtifactException::class);
+        $this->expectExceptionMessage(
+            'A compiled "McpRegistry resource" artifact has a malformed entry (an unexpected or missing field) — the cache is stale or corrupt.',
+        );
+
+        McpRegistry::fromArray([
+            'tools' => [],
+            'resources' => [[
+                'uri' => 'kinetis://docs/x',
+                'name' => 'x',
+                'description' => '',
+                'mimeType' => 'text/markdown',
+                'controllerClass' => 'App\\C',
+                'controllerMethod' => 'read',
+                'bogus' => 'unexpected',
+            ]],
+        ]);
+    }
+
     // KINETIS-76 third follow-up: malformed inputSchemaObjectPaths
     // artifacts — a hand-edited or otherwise corrupt compiled cache
     // file, not something toArray() itself could ever produce — must be
@@ -446,7 +495,16 @@ final class McpRegistryTest extends TestCase
 
     public function test_from_array_rejects_a_non_string_object_path_segment(): void
     {
-        $this->expectException(CacheArtifactExceptionInterface::class);
+        // Asserted on the exact message, not just the exception type: a
+        // segment-shape check that's skipped entirely still reaches a
+        // *different* CacheArtifactExceptionInterface downstream (the
+        // int segment 42 fails castPathToObject()'s own "resolves to a
+        // real array node" check instead), which a class-only assertion
+        // can't tell apart from this check actually having done its job.
+        $this->expectException(InvalidCacheArtifactException::class);
+        $this->expectExceptionMessage(
+            'A compiled "McpRegistry tool" artifact has a malformed entry (a non-string path segment in "inputSchemaObjectPaths") — the cache is stale or corrupt.',
+        );
 
         McpRegistry::fromArray([
             'tools' => [[
