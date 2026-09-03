@@ -8,6 +8,8 @@ use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Mcp\Exception\UnresolvableParameterException;
 use Kinetis\Validation\Exception\ValidationException;
 use Kinetis\Validation\Hydrator;
+use Kinetis\Validation\JsonObject;
+use Kinetis\Validation\JsonTree;
 use Psr\Container\ContainerInterface;
 use ReflectionMethod;
 use Throwable;
@@ -184,6 +186,15 @@ final class McpDispatcher
     private function resolveValueFromPlan(mixed $value, array $param): mixed
     {
         if ($param['dtoClass'] !== null) {
+            // A DTO-typed tool argument's own real value — a genuine JSON
+            // object — arrives marked as a JsonObject once McpServer's own
+            // JsonTree::convert() step is in the picture (see its own
+            // docblock); unwrapped here so the existing is_array()
+            // recursion below still applies unchanged.
+            if ($value instanceof JsonObject) {
+                $value = $value->toArray();
+            }
+
             if (is_array($value)) {
                 /** @var class-string $dtoClass */
                 $dtoClass = $param['dtoClass'];
@@ -211,7 +222,14 @@ final class McpDispatcher
             }
         }
 
-        return $this->castScalar($value, $scalarType);
+        // The type-mismatch check above runs against the still-marked
+        // value, so it can correctly reject an object-shaped argument for
+        // an array/iterable-typed parameter — but the value a mixed-typed
+        // argument (or an array/iterable argument's own nested contents)
+        // actually receives must never leak that marker; see Hydrator::
+        // resolveParameterValue()'s identical reasoning for the #[Body]
+        // case this mirrors.
+        return $this->castScalar(JsonTree::unwrap($value), $scalarType);
     }
 
     private static function describeType(mixed $value): string

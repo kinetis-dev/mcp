@@ -6,6 +6,7 @@ namespace Kinetis\Mcp\Tests;
 
 use Kinetis\Config\Config;
 use Kinetis\Container\AppScope;
+use Kinetis\Mcp\JsonObject;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\McpServer;
 use Kinetis\Mcp\PackageBootstrap;
@@ -31,7 +32,15 @@ final class PackageBootstrapTest extends TestCase
         $server = $app->get(McpServer::class);
         self::assertInstanceOf(McpServer::class, $server);
 
-        $response = $server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list']);
+        $response = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'tools/list',
+            'params' => ['_meta' => [
+                'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
+                'io.modelcontextprotocol/clientCapabilities' => new JsonObject([]),
+            ]],
+        ]);
 
         self::assertNotNull($response);
         $names = array_column($response['result']['tools'], 'name');

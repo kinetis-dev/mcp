@@ -83,16 +83,30 @@ final class McpServeCommandTest extends TestCase
         return $decoded;
     }
 
-    public function test_answers_an_initialize_handshake(): void
+    /**
+     * The `_meta` every request needs — required by the 2026-07-28
+     * protocol, the only revision this server implements.
+     *
+     * @return array<string, mixed>
+     */
+    private function meta(): array
+    {
+        return [
+            'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities' => (object) [],
+        ];
+    }
+
+    public function test_answers_a_server_discover_request(): void
     {
         $responses = $this->serve([
-            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => []],
+            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'server/discover', 'params' => ['_meta' => $this->meta()]],
         ]);
 
         self::assertCount(1, $responses);
         self::assertSame('2.0', $responses[0]['jsonrpc']);
         self::assertSame(1, $responses[0]['id']);
-        self::assertArrayHasKey('protocolVersion', $responses[0]['result']);
+        self::assertArrayHasKey('supportedVersions', $responses[0]['result']);
     }
 
     /**
@@ -105,8 +119,8 @@ final class McpServeCommandTest extends TestCase
     public function test_lists_tools_and_resources_for_a_project_with_none_of_its_own(): void
     {
         $responses = $this->serve([
-            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list'],
-            ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'resources/list'],
+            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list', 'params' => ['_meta' => $this->meta()]],
+            ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'resources/list', 'params' => ['_meta' => $this->meta()]],
         ]);
 
         self::assertCount(2, $responses);
@@ -117,7 +131,7 @@ final class McpServeCommandTest extends TestCase
     public function test_an_unknown_method_is_a_json_rpc_error_rather_than_a_crash(): void
     {
         $responses = $this->serve([
-            ['jsonrpc' => '2.0', 'id' => 9, 'method' => 'no/such/method'],
+            ['jsonrpc' => '2.0', 'id' => 9, 'method' => 'no/such/method', 'params' => ['_meta' => $this->meta()]],
         ]);
 
         self::assertSame(-32601, $responses[0]['error']['code']);
@@ -130,8 +144,8 @@ final class McpServeCommandTest extends TestCase
     public function test_a_notification_produces_no_response(): void
     {
         $responses = $this->serve([
-            ['jsonrpc' => '2.0', 'method' => 'notifications/initialized'],
-            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'ping'],
+            ['jsonrpc' => '2.0', 'method' => 'tools/list', 'params' => ['_meta' => $this->meta()]],
+            ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'server/discover', 'params' => ['_meta' => $this->meta()]],
         ]);
 
         self::assertCount(1, $responses);

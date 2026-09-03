@@ -56,12 +56,28 @@ final class McpScopeLifecycleTest extends TestCase
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    private static function meta(): array
+    {
+        return [
+            'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities' => (object) [],
+        ];
+    }
+
+    /**
      * @param array<string, mixed> $message
      * @return array<string, mixed>
      */
     private static function toolCall(int $id, string $tool): array
     {
-        return ['jsonrpc' => '2.0', 'id' => $id, 'method' => 'tools/call', 'params' => ['name' => $tool]];
+        return [
+            'jsonrpc' => '2.0',
+            'id' => $id,
+            'method' => 'tools/call',
+            'params' => ['name' => $tool, '_meta' => self::meta()],
+        ];
     }
 
     /**
@@ -221,12 +237,15 @@ final class McpScopeLifecycleTest extends TestCase
         $app = $this->app();
         $kernel = $this->kernelFor($app);
 
-        $request = new ServerRequest('POST', '/mcp', ['Content-Type' => 'application/json']);
+        $request = (new ServerRequest('POST', '/mcp', ['Content-Type' => 'application/json']))
+            ->withHeader('MCP-Protocol-Version', '2026-07-28')
+            ->withHeader('Mcp-Method', 'tools/call')
+            ->withHeader('Mcp-Name', 'register_dispose_hook');
         $request->getBody()->write(\json_encode([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'tools/call',
-            'params' => ['name' => 'register_dispose_hook', '_meta' => ['progressToken' => 'tok']],
+            'params' => ['name' => 'register_dispose_hook', '_meta' => [...self::meta(), 'progressToken' => 'tok']],
         ], JSON_THROW_ON_ERROR));
         $request->getBody()->rewind();
 
@@ -250,7 +269,10 @@ final class McpScopeLifecycleTest extends TestCase
 
     private function postTool(Kernel $kernel, int $id, string $tool = 'probe_scope'): mixed
     {
-        $request = new ServerRequest('POST', '/mcp', ['Content-Type' => 'application/json']);
+        $request = (new ServerRequest('POST', '/mcp', ['Content-Type' => 'application/json']))
+            ->withHeader('MCP-Protocol-Version', '2026-07-28')
+            ->withHeader('Mcp-Method', 'tools/call')
+            ->withHeader('Mcp-Name', $tool);
         $request->getBody()->write(\json_encode(self::toolCall($id, $tool), JSON_THROW_ON_ERROR));
         $request->getBody()->rewind();
 

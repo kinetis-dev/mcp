@@ -9,7 +9,9 @@ use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\ProgressReporter;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
+use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
 use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
+use Kinetis\Mcp\ToolDefinition;
 use Kinetis\Validation\Exception\ValidationException;
 use PHPUnit\Framework\TestCase;
 
@@ -46,9 +48,9 @@ final class McpDispatcherTest extends TestCase
         $tool = $this->registry()->findTool('create_user');
         self::assertNotNull($tool);
 
-        $result = $this->dispatcher()->callTool($tool, ['data' => ['name' => 'Alon', 'email' => 'alon@noy.cc']]);
+        $result = $this->dispatcher()->callTool($tool, ['data' => ['name' => 'Alon', 'email' => 'alon@example.com']]);
 
-        self::assertSame(['name' => 'Alon', 'email' => 'alon@noy.cc'], $result);
+        self::assertSame(['name' => 'Alon', 'email' => 'alon@example.com'], $result);
     }
 
     public function test_invalid_dto_argument_throws_a_validation_exception(): void
@@ -87,6 +89,93 @@ final class McpDispatcherTest extends TestCase
         } catch (ValidationException $e) {
             self::assertArrayHasKey('data', $e->errors);
         }
+    }
+
+    // KINETIS-75: a real tools/call must accept/reject exactly what the
+    // tool's own inputSchema (see McpRegistryTest) declares.
+
+    private function nullableFieldsTool(): ToolDefinition
+    {
+        $registry = new McpRegistry();
+        $registry->register(NullableFieldsToolController::class);
+        $tool = $registry->findTool('nullable_fields');
+        self::assertNotNull($tool);
+
+        return $tool;
+    }
+
+    public function test_a_defaultless_nullable_nested_field_rejects_omission(): void
+    {
+        $tool = $this->nullableFieldsTool();
+
+        try {
+            $this->dispatcher()->callTool($tool, ['data' => []]);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            // Not "data.requiredNullable": callTool()'s own 'data' param is
+            // the top-level DTO itself here, hydrated directly via
+            // Hydrator::hydrate() — the dotted "parent.nested" key only
+            // appears when a DTO is nested *inside* another one
+            // (resolveNestedDtoValue()), which this fixture's own single
+            // top-level DTO argument never is.
+            self::assertSame(['is required.'], $e->errors['requiredNullable']);
+        }
+    }
+
+    public function test_a_defaultless_nullable_nested_field_accepts_an_explicit_null(): void
+    {
+        $tool = $this->nullableFieldsTool();
+
+        $result = $this->dispatcher()->callTool($tool, ['data' => ['requiredNullable' => null]]);
+
+        self::assertSame(
+            ['requiredNullable' => null, 'optionalNullable' => null, 'optionalItem' => null, 'optionalItems' => null],
+            $result,
+        );
+    }
+
+    public function test_a_defaulted_nullable_scalar_accepts_both_omission_and_an_explicit_null(): void
+    {
+        $tool = $this->nullableFieldsTool();
+
+        $omitted = $this->dispatcher()->callTool($tool, ['data' => ['requiredNullable' => 'x']]);
+        $explicitNull = $this->dispatcher()->callTool($tool, ['data' => ['requiredNullable' => 'x', 'optionalNullable' => null]]);
+
+        self::assertNull($omitted['optionalNullable']);
+        self::assertNull($explicitNull['optionalNullable']);
+    }
+
+    public function test_a_nullable_nested_dto_accepts_both_omission_and_an_explicit_null(): void
+    {
+        $tool = $this->nullableFieldsTool();
+
+        $omitted = $this->dispatcher()->callTool($tool, ['data' => ['requiredNullable' => 'x']]);
+        $explicitNull = $this->dispatcher()->callTool($tool, ['data' => ['requiredNullable' => 'x', 'optionalItem' => null]]);
+        $present = $this->dispatcher()->callTool($tool, [
+            'data' => ['requiredNullable' => 'x', 'optionalItem' => ['product' => 'widget', 'quantity' => 3]],
+        ]);
+
+        self::assertNull($omitted['optionalItem']);
+        self::assertNull($explicitNull['optionalItem']);
+        self::assertSame(3, $present['optionalItem']);
+    }
+
+    public function test_a_nullable_list_of_field_accepts_both_omission_and_an_explicit_null(): void
+    {
+        $tool = $this->nullableFieldsTool();
+
+        $omitted = $this->dispatcher()->callTool($tool, ['data' => ['requiredNullable' => 'x']]);
+        $explicitNull = $this->dispatcher()->callTool($tool, ['data' => ['requiredNullable' => 'x', 'optionalItems' => null]]);
+        $present = $this->dispatcher()->callTool($tool, [
+            'data' => [
+                'requiredNullable' => 'x',
+                'optionalItems' => [['product' => 'a', 'quantity' => 1], ['product' => 'b', 'quantity' => 2]],
+            ],
+        ]);
+
+        self::assertNull($omitted['optionalItems']);
+        self::assertNull($explicitNull['optionalItems']);
+        self::assertSame(2, $present['optionalItems']);
     }
 
     public function test_reads_a_resource(): void

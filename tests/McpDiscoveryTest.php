@@ -81,9 +81,11 @@ final class McpDiscoveryTest extends TestCase
     /**
      * The package root is both the project and the location of
      * KinetisDocsResource, so the class surfaces from more than one scan
-     * pass. McpRegistry::register() has no duplicate-name check — without
-     * the discoverer's own dedup, every docs resource would register
-     * twice.
+     * pass. McpRegistry::register() is idempotent per class on its own —
+     * registering the same class twice is a safe no-op — so this stays
+     * correct with or without McpDiscovery's own $seen-based dedup; that
+     * dedup exists purely to avoid reflecting the class twice, not to
+     * prevent a duplicate resource.
      */
     public function test_discovering_against_this_package_root_does_not_duplicate_the_docs_resource(): void
     {

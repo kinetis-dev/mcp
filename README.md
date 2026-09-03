@@ -18,6 +18,10 @@
 
 ---
 
+Part of [Kinetis](https://kinetis.dev/), a non-blocking PHP framework for
+API-first applications, developed in the
+[kinetis-dev/kinetis](https://github.com/kinetis-dev/kinetis) monorepo.
+
 The [Model Context Protocol](https://modelcontextprotocol.io) server for
 [Kinetis](https://github.com/kinetis-dev/kinetis) — tools and resources
 an AI agent can discover and call, declared with attributes and
@@ -38,13 +42,17 @@ final readonly class AccountController
 
 Two transports: stdio (`kinetis mcp:serve` — how Claude Desktop, Cursor,
 and most local clients launch a server) and Streamable HTTP (`/mcp`, an
-ordinary route). Both protocol eras are supported side by side — the
-legacy `2025-03-26` handshake and the stateless `2026-07-28` per-request
-model. Every message is its own unit of work: a fresh request scope,
+ordinary route), both implementing the `2026-07-28` revision's
+stateless, per-request model. Every message is its own unit of work: a
+fresh request scope,
 transaction rollback for anything a tool leaves open, disposal once the
 response is written. The `mcp` middleware group authenticates the HTTP
 endpoint with the same middleware the auth packages ship for routes, and
-the identity they resolve reaches the tool.
+the identity they resolve reaches the tool. An unexpected exception — a
+tool, a resource, or the logger reporting either one — never crashes the
+server or reaches the client as anything more than a fixed, generic
+message; see the "Error handling" section at
+[kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html).
 
 ## Provides
 
@@ -79,7 +87,8 @@ Read from the environment (or `.env`) via `Kinetis\Config`:
 composer require kinetis/mcp
 ```
 
-Requires PHP 8.4 or later. Documentation:
+Requires PHP 8.4 or later and [`kinetis/framework`](https://github.com/kinetis-dev/framework).
+Documentation:
 [kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html)
 
 ## License

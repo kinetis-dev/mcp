@@ -7,6 +7,7 @@ namespace Kinetis\Mcp\Tests;
 use Kinetis\Container\AppScope;
 use Kinetis\Mcp\Attributes\McpResource;
 use Kinetis\Mcp\Exception\DocsResourceException;
+use Kinetis\Mcp\JsonObject;
 use Kinetis\Mcp\KinetisDocsResource;
 use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
@@ -166,9 +167,25 @@ final class KinetisDocsResourceTest extends TestCase
         }
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    private function meta(): array
+    {
+        return [
+            'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities' => new JsonObject([]),
+        ];
+    }
+
     public function test_resources_list_includes_every_docs_page(): void
     {
-        $response = $this->server()->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'resources/list']);
+        $response = $this->server()->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'resources/list',
+            'params' => ['_meta' => $this->meta()],
+        ]);
 
         $uris = array_column($response['result']['resources'], 'uri');
 
@@ -183,7 +200,7 @@ final class KinetisDocsResourceTest extends TestCase
             'jsonrpc' => '2.0',
             'id' => 2,
             'method' => 'resources/read',
-            'params' => ['uri' => 'kinetis://docs/tutorial'],
+            'params' => ['uri' => 'kinetis://docs/tutorial', '_meta' => $this->meta()],
         ]);
 
         self::assertSame('text/markdown', $response['result']['contents'][0]['mimeType']);

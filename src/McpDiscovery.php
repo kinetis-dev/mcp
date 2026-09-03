@@ -34,12 +34,15 @@ final class McpDiscovery
     {
         $registry = new McpRegistry();
 
-        // Deduped across both passes: when the project root and framework
-        // root are the same repository, a class under Kinetis\Mcp can
-        // surface from both classesInProject() and
-        // classesUnderFrameworkSegment(). McpRegistry::register() has no
-        // duplicate-name check, so without this a tool/resource would
-        // register twice.
+        // Deduped across both passes purely to avoid redundant reflection
+        // work: when the project root and framework root are the same
+        // repository, a class under Kinetis\Mcp can surface from both
+        // classesInProject() and classesUnderFrameworkSegment(), and
+        // without this it would be reflected twice in the same discover()
+        // call. Correctness never depends on this set — McpRegistry::register()
+        // is idempotent per class on its own (a class already registered is
+        // a safe no-op), so a duplicate class surfacing from two passes
+        // would be harmless even without this optimization.
         /** @var array<class-string, true> $seen */
         $seen = [];
 

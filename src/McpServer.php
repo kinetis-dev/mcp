@@ -6,6 +6,8 @@ namespace Kinetis\Mcp;
 
 use Kinetis\Mcp\Exception\JsonRpcException;
 use Kinetis\Validation\Exception\ValidationException;
+use Kinetis\Validation\JsonObject as ValidationJsonObject;
+use Kinetis\Validation\JsonTree;
 use Closure;
 use Psr\Container\ContainerInterface;
 use Psr\Log\LoggerInterface;
@@ -28,35 +30,30 @@ use Throwable;
  * malformed request) become a JSON-RPC `error` response. Anything
  * unexpected is caught at the top of handle() as -32603 Internal error —
  * a stdio transport is a long-running process; one bad request must not
- * be able to crash it. That catch also logs via $logger — a NullLogger
- * by default, since McpServer is constructed directly by the consumer
- * (bin/kinetis, a Kernel's $mcp param) rather than through the container,
- * so there's no AppScope-registered LoggerInterface to autowire the way
- * ExceptionHandlerMiddleware gets one.
+ * be able to crash it, and the client-facing envelope carries a fixed,
+ * generic message rather than the caught exception's own — its text can
+ * carry SQL, a path, or a credential, none of which belongs to a remote
+ * caller, the identical containment callTool()'s own generic "Tool
+ * execution failed." already applies. Both this catch and callTool()'s
+ * own log the real exception via $logger (a NullLogger by default, since
+ * McpServer is constructed directly by the consumer — bin/kinetis, a
+ * Kernel's $mcp param — rather than through the container, so there's
+ * no AppScope-registered LoggerInterface to autowire the way
+ * ExceptionHandlerMiddleware gets one) — through logSafely(), which
+ * discards a logger's own failure rather than letting it escape and
+ * turn an observability problem into the very crash this class exists
+ * to prevent.
  */
 final class McpServer
 {
     /**
-     * The version that defines Streamable HTTP, replacing the deprecated
-     * dual-endpoint HTTP+SSE transport from 2024-11-05 — see
-     * Kernel::handleMcp() for what that means for the HTTP side of this
-     * server. Clients on this version identify themselves by NOT sending a
-     * `_meta.io.modelcontextprotocol/protocolVersion` on requests, and
-     * negotiate via the initialize/notifications-initialized handshake
-     * below — that handshake is untouched by the modern era support added
-     * alongside it.
+     * The 2026-07-28 revision's stateless, per-request model: every
+     * request carries its own protocol version and capabilities in
+     * `params._meta`, and there is no connection-level negotiation — no
+     * initialize/notifications-initialized handshake, no `ping`. This is
+     * the only protocol era this server implements.
      */
-    private const LEGACY_PROTOCOL_VERSION = '2025-03-26';
-
-    /**
-     * The 2026-07-28 revision replaces the initialize handshake with a
-     * stateless, per-request model: every request carries its own
-     * protocol version and capabilities in `params._meta`, and there is no
-     * connection-level negotiation to skip. Kinetis supports both eras
-     * side by side (see isModernRequest()) rather than picking one —
-     * real clients in the wild still speak the legacy handshake.
-     */
-    private const MODERN_PROTOCOL_VERSION = '2026-07-28';
+    private const PROTOCOL_VERSION = '2026-07-28';
 
     private const META_PROTOCOL_VERSION_KEY = 'io.modelcontextprotocol/protocolVersion';
     private const META_CLIENT_CAPABILITIES_KEY = 'io.modelcontextprotocol/clientCapabilities';
@@ -101,50 +98,161 @@ final class McpServer
     ) {}
 
     /**
-     * Whether a decoded JSON-RPC message is using the 2026-07-28 per-request
-     * model. Static and side-effect-free so Kernel's HTTP-header validation
-     * (a transport concern this class doesn't know about) can make the same
-     * era determination without duplicating the `_meta` key name.
+     * $message may carry `params` in either shape JsonRpcCodec::decode()/
+     * McpServer::handle() work with — the raw, not-yet-flattened value
+     * decode() hands back, or an already-flattened plain array from a
+     * direct caller — objectGet() reads either correctly.
      *
-     * Keyed on the presence of any `io.modelcontextprotocol/`-prefixed key
-     * in `_meta` — not on the mere presence of `_meta` itself, and not on
-     * whether `protocolVersion` specifically is present or valid. Both
-     * narrower checks are wrong for a real case: `_meta.progressToken` (see
-     * ProgressReporter) is a spec-general reserved key a *legacy*
-     * 2025-03-26 client can legitimately send on its own, with no
-     * `io.modelcontextprotocol/*` keys at all — that must stay on the
-     * legacy path. A modern request missing `protocolVersion` but still
-     * carrying e.g. `io.modelcontextprotocol/clientCapabilities` must still
-     * be routed to modern-path validation (a proper -32602/-32022) rather
-     * than silently falling through to the legacy match arm — hence
-     * matching on the namespaced prefix generally, not one specific key.
-     *
-     * @param array<string, mixed> $message
-     */
-    public static function isModernRequest(array $message): bool
-    {
-        $params = is_array($message['params'] ?? null) ? $message['params'] : [];
-        $meta = is_array($params['_meta'] ?? null) ? $params['_meta'] : [];
-
-        foreach (array_keys($meta) as $key) {
-            if (is_string($key) && str_starts_with($key, 'io.modelcontextprotocol/')) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
      * @param array<string, mixed> $message
      */
     public static function requestedProtocolVersion(array $message): ?string
     {
-        $params = is_array($message['params'] ?? null) ? $message['params'] : [];
-        $meta = is_array($params['_meta'] ?? null) ? $params['_meta'] : [];
-        $version = $meta[self::META_PROTOCOL_VERSION_KEY] ?? null;
+        $params = $message['params'] ?? [];
+        $meta = JsonRpcCodec::objectGet($params, '_meta') ?? [];
+        $version = JsonRpcCodec::objectGet($meta, self::META_PROTOCOL_VERSION_KEY);
 
         return is_string($version) ? $version : null;
+    }
+
+    /**
+     * The full request preflight: JsonRpcCodec's own envelope rules, plus
+     * every MCP-specific nested requirement handle() would otherwise only
+     * discover once dispatch had already begun — `_meta`'s own shape and
+     * required keys, `clientCapabilities`' shape, and (method-specific)
+     * `tools/call`'s `name`/`arguments`/`progressToken` or
+     * `resources/read`'s `uri`. Side-effect-free: never invokes a tool or
+     * resource, never emits progress, never opens a stream. `handle()`
+     * runs this unconditionally as its first step; `Http\McpController`
+     * also runs it directly, before the mirrored-header check and stream
+     * selection, so a malformed nested value can never surface as a
+     * header mismatch or open an SSE stream it will only reject once
+     * dispatched anyway.
+     *
+     * $message's `params`, like requestedProtocolVersion()'s, may be
+     * either shape — every read here goes through JsonRpcCodec's object
+     * accessors specifically so a caller reaching this via decode()'s raw,
+     * not-yet-flattened `params` still gets the full-fidelity shape
+     * checks its own docblock describes, not the array-boundary's more
+     * tolerant one.
+     *
+     * A structurally invalid envelope (JsonRpcCodec::validateMessage()'s
+     * own concern) always produces a response, regardless of `id` — the
+     * envelope is exactly what would tell us whether "no id" means
+     * notification, so it can't be trusted to mean that when it's the
+     * thing that's broken. Once the envelope is confirmed valid, `id`'s
+     * presence is reliable, and a nested MCP-specific failure past that
+     * point is suppressed entirely for a notification — no response, and
+     * (see PreflightResult's own docblock for why this has to be a
+     * distinct outcome from "valid") no dispatch either.
+     *
+     * @param array<string, mixed> $message
+     */
+    public function preflight(array $message): PreflightResult
+    {
+        $envelopeError = JsonRpcCodec::validateMessage($message);
+
+        if ($envelopeError !== null) {
+            return PreflightResult::respond($envelopeError);
+        }
+
+        $hasId = array_key_exists('id', $message);
+        $id = $message['id'] ?? null;
+        $method = $message['method'];
+        $params = $message['params'] ?? [];
+
+        try {
+            $meta = $this->requireNamedObject($params, '_meta');
+            $this->validateMeta($meta);
+
+            match ($method) {
+                'tools/call' => $this->preflightToolCall($params, $meta),
+                'resources/read' => $this->preflightReadResource($params),
+                default => null,
+            };
+        } catch (JsonRpcException $e) {
+            return $hasId
+                ? PreflightResult::respond(JsonRpcCodec::errorEnvelope($id, $e))
+                : PreflightResult::suppress();
+        }
+
+        return PreflightResult::proceed();
+    }
+
+    /**
+     * Reads a named-object member of $container — `_meta` off `params`,
+     * `arguments` off `params`, or `clientCapabilities` off `_meta` —
+     * tolerating an absent value as "none given" but rejecting a present
+     * one of the wrong shape (JsonRpcCodec::isStrictJsonObject()) rather
+     * than silently coercing it to an empty array. The returned value is
+     * deliberately not flattened — a caller validating a member nested
+     * inside it needs the same raw-shape fidelity this method itself
+     * relied on to check $container.
+     */
+    private function requireNamedObject(mixed $container, string $key): mixed
+    {
+        if (!JsonRpcCodec::objectHas($container, $key)) {
+            return [];
+        }
+
+        $value = JsonRpcCodec::objectGet($container, $key);
+
+        if (!JsonRpcCodec::isStrictJsonObject($value)) {
+            throw JsonRpcException::invalidParams("The \"{$key}\" member must be an object.");
+        }
+
+        return $value;
+    }
+
+    /**
+     * `tools/call`'s own preflight: `name` is required and must be a
+     * non-empty string — checked here, not left to callTool()'s own
+     * "Unknown tool" lookup, specifically so a missing/wrong-typed/empty
+     * name is caught before Http\McpController ever decides whether to
+     * open the SSE stream, not discovered one event after it already has.
+     * A well-formed but unregistered name is deliberately *not* rejected
+     * here — that's a semantic lookup callTool() itself still performs,
+     * since preflight() only checks shape, never registry membership.
+     * `arguments`, when present, must be object-shaped;
+     * `_meta.progressToken`, when present, must be the same string/
+     * integer domain McpServer's own token type supports — an absent one
+     * silently means "no progress requested," matching every other
+     * optional field here, but a present, wrong-typed one is rejected
+     * rather than silently disabling progress: a client that explicitly
+     * asked for it deserves an error, not quiet non-reporting it can't
+     * tell apart from a tool that simply never reports any.
+     */
+    private function preflightToolCall(mixed $params, mixed $meta): void
+    {
+        $name = JsonRpcCodec::objectGet($params, 'name');
+
+        if (!is_string($name) || $name === '') {
+            throw JsonRpcException::invalidParams('The "name" member is required and must be a non-empty string.');
+        }
+
+        $this->requireNamedObject($params, 'arguments');
+
+        if (JsonRpcCodec::objectHas($meta, 'progressToken')) {
+            $token = JsonRpcCodec::objectGet($meta, 'progressToken');
+
+            if (!is_string($token) && !is_int($token)) {
+                throw JsonRpcException::invalidParams('The "progressToken" member must be a string or integer.');
+            }
+        }
+    }
+
+    /**
+     * `resources/read`'s own preflight — `uri` is required and must be a
+     * non-empty string, the same "shape only, never registry membership"
+     * split preflightToolCall()'s own docblock explains: a well-formed
+     * but unregistered uri is left to readResource()'s own lookup.
+     */
+    private function preflightReadResource(mixed $params): void
+    {
+        $uri = JsonRpcCodec::objectGet($params, 'uri');
+
+        if (!is_string($uri) || $uri === '') {
+            throw JsonRpcException::invalidParams('The "uri" member is required and must be a non-empty string.');
+        }
     }
 
     /**
@@ -168,60 +276,82 @@ final class McpServer
      */
     public function handle(array $message, ?Closure $onNotification = null, ?ContainerInterface $scope = null): ?array
     {
-        $hasId = array_key_exists('id', $message);
-        $id = $message['id'] ?? null;
-        $method = $message['method'] ?? null;
-        /** @var array<string, mixed> $params */
-        $params = is_array($message['params'] ?? null) ? $message['params'] : [];
+        // Defends this public array boundary itself, rather than trusting
+        // that a caller already ran the message through JsonRpcCodec::
+        // decode() and McpServer::preflight() — the same shared rules
+        // either way, so a message built directly (bypassing both
+        // transports) gets identical treatment. See preflight()'s own
+        // docblock for the structural-failure-vs-notification-suppression
+        // split PreflightResult exists to carry correctly.
+        $preflight = $this->preflight($message);
 
-        if (!is_string($method)) {
-            return $hasId ? $this->errorEnvelope($id, JsonRpcException::parseError()) : null;
+        if (!$preflight->shouldDispatch) {
+            return $preflight->response;
         }
 
-        $isModern = self::isModernRequest($message);
+        $hasId = array_key_exists('id', $message);
+        $id = $message['id'] ?? null;
+        /** @var string $method validated as a string by preflight() above */
+        $method = $message['method'];
+        // preflight() has already validated every shape this touches —
+        // params itself, and (for the methods that need them) _meta,
+        // clientCapabilities, arguments, and progressToken — so this is
+        // a plain conversion, not a second validation pass.
+        /** @var array<string, mixed> $params */
+        $params = JsonRpcCodec::toArrayDeep($message['params'] ?? []);
+
+        // toArrayDeep() above is correct for every other params member —
+        // _meta/clientCapabilities/progressToken never reach Hydrator, so
+        // flattening them loses nothing real — but arguments is the one
+        // member that does, via McpDispatcher, and Hydrator's own array/
+        // iterable type-mismatch check needs the same object-vs-array
+        // distinction toArrayDeep() just discarded for the whole tree (a
+        // JSON object whose own keys happen to look sequential, like
+        // {"0":"a","1":"b"}, decodes to the identical PHP shape a real
+        // JSON array does once flattened — array_is_list() alone cannot
+        // tell them apart after the fact). Converted separately here,
+        // from the *raw*, not-yet-flattened node, preserving that
+        // distinction with Kinetis\Validation\JsonObject markers instead.
+        // A Kinetis\Mcp\JsonObject here (a message built directly rather
+        // than through JsonRpcCodec::decode() — see that class's own
+        // docblock) is unwrapped to a plain array first: JsonTree::convert()
+        // only understands the stdClass/array shapes decode() itself
+        // produces, not this package's own hand-built-message marker.
+        $rawArguments = JsonRpcCodec::objectGet($message['params'] ?? [], 'arguments');
+        $rawArguments = $rawArguments instanceof JsonObject ? $rawArguments->toArray() : $rawArguments;
+        $convertedArguments = JsonTree::convert($rawArguments);
+        $params['arguments'] = $convertedArguments instanceof ValidationJsonObject
+            ? $convertedArguments->toArray()
+            : $convertedArguments;
 
         try {
-            if ($isModern) {
-                /** @var array<string, mixed> $meta */
-                $meta = is_array($params['_meta'] ?? null) ? $params['_meta'] : [];
-                $this->validateModernRequest($meta);
+            /** @var array<string, mixed> $meta */
+            $meta = is_array($params['_meta'] ?? null) ? $params['_meta'] : [];
 
-                $result = match ($method) {
-                    'server/discover' => $this->discover(),
-                    // No 'ping' arm here, deliberately — checked directly
-                    // against the real 2026-07-28 changelog, not assumed
-                    // still valid: this revision removed ping (along with
-                    // logging/setLevel and notifications/roots/list_changed)
-                    // from the core protocol entirely. The legacy arm below
-                    // keeps it, since 2025-03-26 clients still send it.
-                    'tools/list' => $this->listTools(),
-                    'tools/call' => $this->callTool($params, $onNotification, $scope),
-                    'resources/list' => $this->listResources(),
-                    'resources/read' => $this->readResource($params, $scope),
-                    default => throw JsonRpcException::methodNotFound($method),
-                };
-                $result = $this->wrapModernResult($result, $method);
-            } else {
-                $result = match ($method) {
-                    'initialize' => $this->initialize(),
-                    'notifications/initialized', 'ping' => [],
-                    'tools/list' => $this->listTools(),
-                    'tools/call' => $this->callTool($params, $onNotification, $scope),
-                    'resources/list' => $this->listResources(),
-                    'resources/read' => $this->readResource($params, $scope),
-                    default => throw JsonRpcException::methodNotFound($method),
-                };
-            }
+            $result = match ($method) {
+                'server/discover' => $this->discover(),
+                // No 'ping' arm here, deliberately — checked directly
+                // against the real 2026-07-28 changelog, not assumed: this
+                // revision removed ping (along with logging/setLevel and
+                // notifications/roots/list_changed) from the core protocol
+                // entirely.
+                'tools/list' => $this->listTools(),
+                'tools/call' => $this->callTool($params, $meta, $onNotification, $scope),
+                'resources/list' => $this->listResources(),
+                'resources/read' => $this->readResource($params, $scope),
+                default => throw JsonRpcException::methodNotFound($method),
+            };
+            $result = $this->wrapResult($result, $method);
         } catch (JsonRpcException $e) {
-            return $hasId ? $this->errorEnvelope($id, $e) : null;
+            return $hasId ? JsonRpcCodec::errorEnvelope($id, $e) : null;
         } catch (Throwable $e) {
-            $this->logger->error('Unhandled exception while handling MCP method {method}: {message}', [
+            $this->logSafely('Unhandled exception while handling MCP method {method}: {message}', [
                 'method' => $method,
                 'message' => $e->getMessage(),
                 'exception' => $e,
             ]);
 
-            return $hasId ? $this->errorEnvelope($id, JsonRpcException::internalError($e->getMessage())) : null;
+            return $hasId ? JsonRpcCodec::errorEnvelope($id, JsonRpcException::internalError()) : null;
         }
 
         if (!$hasId) {
@@ -240,13 +370,15 @@ final class McpServer
      * are both required on every request's `_meta`. A request missing
      * either is malformed and MUST be rejected with -32602 (Invalid
      * params); a request naming an unsupported version gets the more
-     * specific -32022 (UnsupportedProtocolVersion) instead.
-     *
-     * @param array<string, mixed> $meta
+     * specific -32022 (UnsupportedProtocolVersion) instead. $meta may be
+     * the raw, not-yet-flattened value requireNamedObject() returns — read
+     * through JsonRpcCodec's object accessors so a stdClass `_meta`
+     * (reached via decode()'s own not-yet-flattened params) gets exactly
+     * the same checks as an already-flattened array one.
      */
-    private function validateModernRequest(array $meta): void
+    private function validateMeta(mixed $meta): void
     {
-        $version = $meta[self::META_PROTOCOL_VERSION_KEY] ?? null;
+        $version = JsonRpcCodec::objectGet($meta, self::META_PROTOCOL_VERSION_KEY);
 
         if (!is_string($version)) {
             throw JsonRpcException::invalidParams(
@@ -254,13 +386,19 @@ final class McpServer
             );
         }
 
-        if ($version !== self::MODERN_PROTOCOL_VERSION) {
-            throw JsonRpcException::unsupportedProtocolVersion([self::MODERN_PROTOCOL_VERSION], $version);
+        if ($version !== self::PROTOCOL_VERSION) {
+            throw JsonRpcException::unsupportedProtocolVersion([self::PROTOCOL_VERSION], $version);
         }
 
-        if (!array_key_exists(self::META_CLIENT_CAPABILITIES_KEY, $meta)) {
+        if (!JsonRpcCodec::objectHas($meta, self::META_CLIENT_CAPABILITIES_KEY)) {
             throw JsonRpcException::invalidParams(
                 'Missing required "_meta.' . self::META_CLIENT_CAPABILITIES_KEY . '".',
+            );
+        }
+
+        if (!JsonRpcCodec::isStrictJsonObject(JsonRpcCodec::objectGet($meta, self::META_CLIENT_CAPABILITIES_KEY))) {
+            throw JsonRpcException::invalidParams(
+                '"_meta.' . self::META_CLIENT_CAPABILITIES_KEY . '" must be an object.',
             );
         }
     }
@@ -271,9 +409,12 @@ final class McpServer
     private function discover(): array
     {
         return [
-            'supportedVersions' => [self::MODERN_PROTOCOL_VERSION],
-            // (object) casts for the same reason as initialize() below —
-            // an empty capability MUST serialize as a JSON object, not [].
+            'supportedVersions' => [self::PROTOCOL_VERSION],
+            // (object) casts: json_encode(['tools' => []]) renders
+            // "tools":[], but the spec's capability values are JSON
+            // objects ("tools":{}) even when empty — a client doing
+            // strict type validation could reject an array where an
+            // object is expected.
             'capabilities' => [
                 'tools' => (object) [],
                 'resources' => (object) [],
@@ -283,13 +424,13 @@ final class McpServer
     }
 
     /**
-     * Wraps a modern-era result in the envelope the 2026-07-28 spec
-     * requires: `resultType` (Kinetis only ever returns "complete" — there's
-     * no multi-round-trip flow to produce "input_required") and a
-     * `_meta.serverInfo` echoing the server's identity, mirroring what
-     * initialize() reports for legacy clients. All three are appended
-     * after the spread so they always win over anything a handler result
-     * might (incorrectly) already contain under those names.
+     * Wraps a result in the envelope the 2026-07-28 spec requires:
+     * `resultType` (Kinetis only ever returns "complete" — there's no
+     * multi-round-trip flow to produce "input_required") and a
+     * `_meta.serverInfo` echoing the server's identity. All three are
+     * appended after the spread so they always win over anything a
+     * handler result might (incorrectly) already contain under those
+     * names.
      *
      * `$method` decides whether `ttlMs`/`cacheScope` are added at all —
      * see CACHEABLE_METHOD_SCOPES's own docblock for which methods are
@@ -298,7 +439,7 @@ final class McpServer
      * @param array<string, mixed> $result
      * @return array<string, mixed>
      */
-    private function wrapModernResult(array $result, string $method): array
+    private function wrapResult(array $result, string $method): array
     {
         $cacheScope = self::CACHEABLE_METHOD_SCOPES[$method] ?? null;
 
@@ -311,29 +452,6 @@ final class McpServer
                     'name' => $this->serverName,
                     'version' => $this->serverVersion,
                 ],
-            ],
-        ];
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function initialize(): array
-    {
-        return [
-            'protocolVersion' => self::LEGACY_PROTOCOL_VERSION,
-            // (object) casts are deliberate: json_encode(['tools' => []])
-            // renders "tools":[], but the spec's capability values are
-            // JSON objects ("tools":{}) even when empty — a client doing
-            // strict type validation on the initialize response could
-            // reject an array where an object is expected.
-            'capabilities' => [
-                'tools' => (object) [],
-                'resources' => (object) [],
-            ],
-            'serverInfo' => [
-                'name' => $this->serverName,
-                'version' => $this->serverVersion,
             ],
         ];
     }
@@ -356,11 +474,22 @@ final class McpServer
     }
 
     /**
+     * $params/$meta arrive already fully validated — preflight() (run
+     * unconditionally by handle() before this is ever reached) has
+     * already confirmed `arguments` is object-shaped-or-absent and
+     * `_meta.progressToken` is string/int-or-absent, so this only needs
+     * to extract, not re-check.
+     *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $meta
      * @return array<string, mixed>
      */
-    private function callTool(array $params, ?Closure $onNotification = null, ?ContainerInterface $scope = null): array
-    {
+    private function callTool(
+        array $params,
+        array $meta,
+        ?Closure $onNotification = null,
+        ?ContainerInterface $scope = null,
+    ): array {
         $name = $params['name'] ?? null;
 
         if (!is_string($name)) {
@@ -375,11 +504,8 @@ final class McpServer
 
         /** @var array<string, mixed> $arguments */
         $arguments = is_array($params['arguments'] ?? null) ? $params['arguments'] : [];
-
-        /** @var array<string, mixed> $meta */
-        $meta = is_array($params['_meta'] ?? null) ? $params['_meta'] : [];
         $progressToken = $meta['progressToken'] ?? null;
-        $progressToken = is_int($progressToken) || is_string($progressToken) ? $progressToken : null;
+        /** @var int|string|null $progressToken already validated by preflight() */
         $progress = new ProgressReporter($progressToken !== null ? $onNotification : null, $progressToken);
 
         try {
@@ -402,7 +528,7 @@ final class McpServer
             // gets a fixed string and the real exception goes to the
             // logger — the same client-facing/logged split
             // ExceptionHandlerMiddleware applies to an HTTP 500.
-            $this->logger->error('Tool "{tool}" threw: {message}', [
+            $this->logSafely('Tool "{tool}" threw: {message}', [
                 'tool' => $name,
                 'message' => $e->getMessage(),
                 'exception' => $e,
@@ -412,6 +538,27 @@ final class McpServer
                 'content' => [['type' => 'text', 'text' => 'Tool execution failed.']],
                 'isError' => true,
             ];
+        }
+    }
+
+    /**
+     * Logging a caught failure must never become a second failure of its
+     * own — PSR-3 places no no-throw obligation on an implementation,
+     * and this class's whole point (both call sites above) is that one
+     * bad request cannot crash a long-running stdio process or replace
+     * the response it already decided on. A logger exception is
+     * discarded silently rather than reported anywhere else: reporting
+     * it would need a second logger, and this already is the terminal
+     * boundary.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function logSafely(string $message, array $context): void
+    {
+        try {
+            $this->logger->error($message, $context);
+        } catch (Throwable) {
+            // Discarded deliberately — see this method's own docblock.
         }
     }
 
@@ -459,27 +606,6 @@ final class McpServer
                 'mimeType' => $resource->mimeType,
                 'text' => is_string($content) ? $content : json_encode($content, JSON_THROW_ON_ERROR),
             ]],
-        ];
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function errorEnvelope(mixed $id, JsonRpcException $e): array
-    {
-        $error = [
-            'code' => $e->rpcCode,
-            'message' => $e->getMessage(),
-        ];
-
-        if ($e->data !== null) {
-            $error['data'] = $e->data;
-        }
-
-        return [
-            'jsonrpc' => '2.0',
-            'id' => $id,
-            'error' => $error,
         ];
     }
 }
