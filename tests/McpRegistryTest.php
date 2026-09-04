@@ -17,10 +17,11 @@ use Kinetis\Cache\PluginCache;
 use Kinetis\Mcp\Exception\DuplicateDefinitionException;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
-use Kinetis\Mcp\Tests\Fixtures\AdversarialSchemaValuesToolController;
 use Kinetis\Mcp\Tests\Fixtures\BuiltinCoverageToolController;
 use Kinetis\Mcp\Tests\Fixtures\DuplicateResourceUriController;
 use Kinetis\Mcp\Tests\Fixtures\DuplicateToolNameController;
+use Kinetis\Mcp\Tests\Fixtures\EmptyCollectionsToolController;
+use Kinetis\Mcp\Tests\Fixtures\JsonHostileSchemaValuesToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
 use Kinetis\Mcp\Tests\Fixtures\IntraClassDuplicateResourceController;
 use Kinetis\Mcp\Tests\Fixtures\IntraClassDuplicateToolController;
@@ -34,6 +35,12 @@ use PHPUnit\Framework\TestCase;
 
 final class McpRegistryTest extends TestCase
 {
+    private const string NOT_AN_OBJECT_ROOT_MESSAGE = 'A compiled "McpRegistry tool" artifact has a malformed entry '
+        . '(an "inputSchemaJson" document whose root is not a JSON object) — the cache is stale or corrupt.';
+
+    private const string NUMERIC_MEMBER_NAME_MESSAGE = 'A compiled "McpRegistry tool" artifact has a malformed entry '
+        . '(an "inputSchemaJson" object with a numeric member name) — the cache is stale or corrupt.';
+
     public function test_registers_tools_and_resources_from_attributes(): void
     {
         $registry = new McpRegistry();
@@ -104,24 +111,18 @@ final class McpRegistryTest extends TestCase
         self::assertSame(3, $tool->inputSchema['properties']['data']['properties']['name']['minLength']);
     }
 
-    public function test_a_zero_parameter_tools_empty_properties_object_survives_a_real_var_export_cache_round_trip(): void
+    /**
+     * The real publish/reload path — var_export() to disk through
+     * CacheStore, then require() back — returning the McpRegistry
+     * section exactly as it comes off disk. Every cache round-trip test
+     * here goes through this rather than calling toArray()/fromArray()
+     * back to back, since writeAll() is what would reject a live object
+     * with CacheWriteException in the first place.
+     *
+     * @return array<string, mixed>
+     */
+    private static function publishAndReloadArtifact(McpRegistry $live): array
     {
-        // JsonSchema::forParameters() casts an empty `properties` to
-        // `(object) []` so it JSON-encodes as `{}`, not `[]` — but this
-        // codebase's own cache format never carries a live PHP object
-        // (the "no live objects in the cache" discipline every other
-        // compiled artifact here follows too), so toArray()/fromArray()
-        // convert it to/from a reserved marker around the actual
-        // var_export()/require() round trip. This is the real failure
-        // this test exists to catch: a zero-parameter tool is exactly
-        // the case that produces one.
-        $live = new McpRegistry();
-        $live->register(ZeroParameterToolController::class);
-
-        $tool = $live->findTool('zero_param_ping');
-        self::assertNotNull($tool);
-        self::assertInstanceOf(\stdClass::class, $tool->inputSchema['properties']);
-
         $directory = sys_get_temp_dir() . '/kinetis_mcp_registry_cache_' . bin2hex(random_bytes(8));
         $store = new CacheStore($directory);
         $compiled = new CompiledCache(
@@ -144,31 +145,60 @@ final class McpRegistryTest extends TestCase
         );
 
         try {
-            // The real path: writeAll() is what would throw the real
-            // CacheWriteException if toArray() hadn't already converted
-            // the stdClass to a plain array.
             $store->writeAll($compiled);
             $pluginCache = $store->loadPlugins();
 
             self::assertNotNull($pluginCache);
-            $reloaded = McpRegistry::fromArray($pluginCache->data[McpRegistry::class]);
 
-            $reloadedTool = $reloaded->findTool('zero_param_ping');
-            self::assertNotNull($reloadedTool);
-            self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']);
-            self::assertSame('{}', json_encode($reloadedTool->inputSchema['properties'], JSON_THROW_ON_ERROR));
+            /** @var array<string, mixed> $data */
+            $data = $pluginCache->data[McpRegistry::class];
+
+            return $data;
         } finally {
             CacheStore::destroy($directory);
         }
     }
 
+    public function test_a_zero_parameter_tools_empty_properties_object_survives_a_real_var_export_cache_round_trip(): void
+    {
+        // JsonSchema::forParameters() spells an empty `properties` as
+        // `(object) []` so it JSON-encodes as `{}` rather than `[]`,
+        // while the `required` list beside it is an empty PHP array
+        // that has to stay `[]`. A compiled artifact carries plain data
+        // only, so the schema goes to disk as JSON text and both keep
+        // their own type. A zero-parameter tool is the case that puts
+        // the pair in one schema.
+        $live = new McpRegistry();
+        $live->register(ZeroParameterToolController::class);
+
+        $tool = $live->findTool('zero_param_ping');
+        self::assertNotNull($tool);
+        self::assertInstanceOf(\stdClass::class, $tool->inputSchema['properties']);
+
+        $artifact = self::publishAndReloadArtifact($live);
+
+        self::assertSame(
+            '{"type":"object","properties":{},"required":[]}',
+            $artifact['tools'][0]['inputSchemaJson'],
+        );
+
+        $reloadedTool = McpRegistry::fromArray($artifact)->findTool('zero_param_ping');
+
+        self::assertNotNull($reloadedTool);
+        self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']);
+        self::assertSame([], $reloadedTool->inputSchema['required']);
+        self::assertSame(
+            '{"type":"object","properties":{},"required":[]}',
+            json_encode($reloadedTool->inputSchema, JSON_THROW_ON_ERROR),
+        );
+    }
+
     /**
      * The same real var_export()/require() cache round trip as the
-     * zero-parameter case above, but for a `stdClass` appearing at an
-     * *arbitrary* nesting depth — a `mixed`-typed tool argument's own
-     * full schema, not the top-level "properties" key — proving
-     * normalizeSchemaForStorage()/restoreSchemaFromStorage() genuinely
-     * walk the whole tree by value type, not just one hardcoded key.
+     * zero-parameter case above, but for a `stdClass` at an arbitrary
+     * nesting depth — a `mixed`-typed tool argument's own whole schema,
+     * not the top-level "properties" key — so the restore walks the
+     * tree rather than one hardcoded key.
      */
     public function test_a_mixed_typed_arguments_empty_schema_object_survives_a_real_var_export_cache_round_trip(): void
     {
@@ -179,184 +209,86 @@ final class McpRegistryTest extends TestCase
         self::assertNotNull($tool);
         self::assertInstanceOf(\stdClass::class, $tool->inputSchema['properties']['note']);
 
-        $directory = sys_get_temp_dir() . '/kinetis_mcp_registry_cache_' . bin2hex(random_bytes(8));
-        $store = new CacheStore($directory);
-        $compiled = new CompiledCache(
-            http: new HttpCache(
-                formatVersion: CacheFormat::VERSION,
-                routes: [],
-                httpBindingPlans: [],
-                hydrationPlans: [],
-                globalMiddleware: [],
-                openApiMiddleware: [],
-                compiledAt: '2026-01-01T00:00:00+00:00',
-            ),
-            commands: new CommandCache(formatVersion: CacheFormat::VERSION, commands: [], compiledAt: '2026-01-01T00:00:00+00:00'),
-            events: new EventCache(formatVersion: CacheFormat::VERSION, listeners: [], compiledAt: '2026-01-01T00:00:00+00:00'),
-            plugins: new PluginCache(
-                formatVersion: CacheFormat::VERSION,
-                data: [McpRegistry::class => $live->toArray()],
-                compiledAt: '2026-01-01T00:00:00+00:00',
-            ),
-        );
-
-        try {
-            $store->writeAll($compiled);
-            $pluginCache = $store->loadPlugins();
-
-            self::assertNotNull($pluginCache);
-            $reloaded = McpRegistry::fromArray($pluginCache->data[McpRegistry::class]);
-
-            $reloadedTool = $reloaded->findTool('builtin_coverage');
-            self::assertNotNull($reloadedTool);
-            $reloadedNote = $reloadedTool->inputSchema['properties']['note'];
-            self::assertInstanceOf(\stdClass::class, $reloadedNote);
-            self::assertSame('{}', json_encode($reloadedNote, JSON_THROW_ON_ERROR));
-
-            // A genuinely non-empty, non-object sibling value survived
-            // the exact same walk unmutated — the marker only ever
-            // touches a real stdClass, never a real empty array (e.g.
-            // `tags`'s own `{type: 'array'}` schema, which is never
-            // itself empty).
-            self::assertSame(['type' => 'array'], $reloadedTool->inputSchema['properties']['tags']);
-        } finally {
-            CacheStore::destroy($directory);
-        }
-    }
-
-    /**
-     * Adversarial cache-round-trip coverage: real schema string values
-     * — an #[In] enum choice and a #[Regex] pattern — that deliberately
-     * equal McpRegistry's own *retired* bare-string marker literal
-     * ("__kinetis_mcp_empty_object__"). The reserved-key array envelope
-     * that replaced it must not mistake either for the marker, and both
-     * must survive the real var_export()/require() round trip byte for
-     * byte.
-     */
-    public function test_a_schema_string_matching_the_retired_marker_literal_survives_the_cache_round_trip_unmutated(): void
-    {
-        $live = new McpRegistry();
-        $live->register(AdversarialSchemaValuesToolController::class);
-
-        $tool = $live->findTool('adversarial_schema_values');
-        self::assertNotNull($tool);
-        self::assertSame(
-            ['__kinetis_mcp_empty_object__', 'other'],
-            $tool->inputSchema['properties']['choice']['enum'],
-        );
-        self::assertSame(
-            '__kinetis_mcp_empty_object__',
-            $tool->inputSchema['properties']['pattern']['pattern'],
-        );
-
-        $directory = sys_get_temp_dir() . '/kinetis_mcp_registry_cache_' . bin2hex(random_bytes(8));
-        $store = new CacheStore($directory);
-        $compiled = new CompiledCache(
-            http: new HttpCache(
-                formatVersion: CacheFormat::VERSION,
-                routes: [],
-                httpBindingPlans: [],
-                hydrationPlans: [],
-                globalMiddleware: [],
-                openApiMiddleware: [],
-                compiledAt: '2026-01-01T00:00:00+00:00',
-            ),
-            commands: new CommandCache(formatVersion: CacheFormat::VERSION, commands: [], compiledAt: '2026-01-01T00:00:00+00:00'),
-            events: new EventCache(formatVersion: CacheFormat::VERSION, listeners: [], compiledAt: '2026-01-01T00:00:00+00:00'),
-            plugins: new PluginCache(
-                formatVersion: CacheFormat::VERSION,
-                data: [McpRegistry::class => $live->toArray()],
-                compiledAt: '2026-01-01T00:00:00+00:00',
-            ),
-        );
-
-        try {
-            $store->writeAll($compiled);
-            $pluginCache = $store->loadPlugins();
-
-            self::assertNotNull($pluginCache);
-            $reloaded = McpRegistry::fromArray($pluginCache->data[McpRegistry::class]);
-
-            $reloadedTool = $reloaded->findTool('adversarial_schema_values');
-            self::assertNotNull($reloadedTool);
-
-            // Neither string value was mistaken for the marker and
-            // converted into an object — both survive as the real
-            // schema strings/lists they actually are.
-            self::assertSame(
-                ['__kinetis_mcp_empty_object__', 'other'],
-                $reloadedTool->inputSchema['properties']['choice']['enum'],
-            );
-            self::assertSame(
-                '__kinetis_mcp_empty_object__',
-                $reloadedTool->inputSchema['properties']['pattern']['pattern'],
-            );
-        } finally {
-            CacheStore::destroy($directory);
-        }
-    }
-
-    /**
-     * KINETIS-76 third follow-up: the collision-free replacement for the
-     * test above. A schema value that is itself an array shaped *exactly*
-     * like the retired reserved-key envelope
-     * (`['__kinetis_mcp_empty_object_marker__' => true]`) — the shape the
-     * previous fix's own marker constant literally was — survives a real
-     * `McpRegistry::fromArray()` -> `toArray()` -> `fromArray()` round
-     * trip completely unmutated, in the same artifact as a real
-     * `stdClass` that genuinely does need converting. Nothing in this
-     * codebase's own real `JsonSchema` vocabulary can actually produce an
-     * array-shaped schema *value* today (`#[In]`'s own `$choices` is
-     * `list<scalar>`, never an array) — constructed directly against the
-     * compiled-artifact shape instead, the same hand-crafted-artifact
-     * precedent `test_from_array_rejects_a_tool_missing_a_required_field()`
-     * already establishes, to prove the *mechanism* itself is
-     * structurally collision-free regardless of whether real JsonSchema
-     * output could ever reach this shape.
-     */
-    public function test_a_schema_value_shaped_like_the_retired_marker_envelope_survives_unmutated(): void
-    {
-        $artifact = [
-            'tools' => [[
-                'name' => 'adversarial_shape',
-                'description' => '',
-                'controllerClass' => 'App\\C',
-                'controllerMethod' => 'run',
-                'inputSchema' => [
-                    'type' => 'object',
-                    // A real value shaped exactly like the retired
-                    // marker envelope, at an ordinary key — must never
-                    // be mistaken for an object-conversion instruction,
-                    // since nothing here compares a value against
-                    // anything any more.
-                    'lookalike' => ['__kinetis_mcp_empty_object_marker__' => true],
-                    // A real stdClass-to-be, at its own recorded path —
-                    // must still be correctly restored in the same
-                    // document as the lookalike above.
-                    'properties' => [],
-                ],
-                'inputSchemaObjectPaths' => [['properties']],
-            ]],
-            'resources' => [],
-        ];
-
-        $registry = McpRegistry::fromArray($artifact);
-        $tool = $registry->findTool('adversarial_shape');
-
-        self::assertNotNull($tool);
-        self::assertSame(['__kinetis_mcp_empty_object_marker__' => true], $tool->inputSchema['lookalike']);
-        self::assertInstanceOf(\stdClass::class, $tool->inputSchema['properties']);
-
-        // Round-tripped a second time through toArray() -> fromArray():
-        // the lookalike value must still survive, and the real object
-        // must still correctly re-derive its own path from a fresh
-        // structural walk, not from anything left over in the first pass.
-        $roundTripped = McpRegistry::fromArray($registry->toArray());
-        $reloadedTool = $roundTripped->findTool('adversarial_shape');
+        $reloadedTool = McpRegistry::fromArray(self::publishAndReloadArtifact($live))->findTool('builtin_coverage');
 
         self::assertNotNull($reloadedTool);
-        self::assertSame(['__kinetis_mcp_empty_object_marker__' => true], $reloadedTool->inputSchema['lookalike']);
-        self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']);
+        $reloadedNote = $reloadedTool->inputSchema['properties']['note'];
+        self::assertInstanceOf(\stdClass::class, $reloadedNote);
+        self::assertSame('{}', json_encode($reloadedNote, JSON_THROW_ON_ERROR));
+
+        // A populated sibling map came back a map — every node is
+        // restored from its own JSON type, not from a rule about where
+        // it sits.
+        self::assertSame(['type' => 'array'], $reloadedTool->inputSchema['properties']['tags']);
+    }
+
+    /**
+     * The adversarial pairing, through the real cache round trip: an
+     * empty `#[In([])]` enum and an empty top-level `required` list,
+     * which are JSON arrays, beside a `mixed`-typed argument's empty
+     * schema object and a nested DTO carrying a second empty object and
+     * a second empty list two levels further down. The stored JSON text
+     * is the one notation that tells the two apart, so each value comes
+     * back the type it went in as, whatever depth it sits at.
+     */
+    public function test_empty_arrays_and_empty_objects_keep_their_json_types_through_a_real_cache_round_trip(): void
+    {
+        $live = new McpRegistry();
+        $live->register(EmptyCollectionsToolController::class);
+
+        $tool = $live->findTool('empty_collections');
+        self::assertNotNull($tool);
+
+        $document = '{"type":"object","properties":{"choice":{"enum":[]},"note":{},'
+            . '"nested":{"type":["object","null"],"properties":{},"required":[]}},"required":[]}';
+        self::assertSame($document, json_encode($tool->inputSchema, JSON_THROW_ON_ERROR));
+
+        $artifact = self::publishAndReloadArtifact($live);
+        self::assertSame($document, $artifact['tools'][0]['inputSchemaJson']);
+
+        $reloadedTool = McpRegistry::fromArray($artifact)->findTool('empty_collections');
+
+        self::assertNotNull($reloadedTool);
+        self::assertEquals($tool->inputSchema, $reloadedTool->inputSchema);
+        self::assertSame($document, json_encode($reloadedTool->inputSchema, JSON_THROW_ON_ERROR));
+
+        // Asserted value by value as well, so a failure names which of
+        // the four lost its JSON type rather than only that the
+        // document differs somewhere.
+        self::assertSame([], $reloadedTool->inputSchema['properties']['choice']['enum']);
+        self::assertSame([], $reloadedTool->inputSchema['required']);
+        self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']['note']);
+        self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']['nested']['properties']);
+        self::assertSame([], $reloadedTool->inputSchema['properties']['nested']['required']);
+    }
+
+    /**
+     * Schema values the stored JSON has to escape — a `#[Regex]`
+     * pattern of quotes and backslashes, `#[In]` choices carrying a
+     * quote, a backslash, a line break and non-ASCII characters — come
+     * back through the real cache round trip byte for byte, and a
+     * float-valued `#[GreaterThan]` bound comes back a float rather
+     * than an int.
+     */
+    public function test_schema_values_that_json_must_escape_survive_a_real_cache_round_trip(): void
+    {
+        $live = new McpRegistry();
+        $live->register(JsonHostileSchemaValuesToolController::class);
+
+        $tool = $live->findTool('json_hostile_schema_values');
+        self::assertNotNull($tool);
+
+        $reloadedTool = McpRegistry::fromArray(self::publishAndReloadArtifact($live))
+            ->findTool('json_hostile_schema_values');
+
+        self::assertNotNull($reloadedTool);
+        self::assertSame('/^"\d+\\\\"$/', $reloadedTool->inputSchema['properties']['pattern']['pattern']);
+        self::assertSame(
+            ['quote"', 'back\\slash', "line\nbreak", 'héllo ☃'],
+            $reloadedTool->inputSchema['properties']['choice']['enum'],
+        );
+        self::assertSame(1.0, $reloadedTool->inputSchema['properties']['amount']['exclusiveMinimum']);
+        self::assertEquals($tool->inputSchema, $reloadedTool->inputSchema);
     }
 
     public function test_implements_the_frameworks_cacheable_discovery_interface(): void
@@ -425,8 +357,7 @@ final class McpRegistryTest extends TestCase
                 'description' => '',
                 'controllerClass' => 'App\\C',
                 'controllerMethod' => 'ping',
-                'inputSchema' => ['type' => 'object'],
-                'inputSchemaObjectPaths' => [],
+                'inputSchemaJson' => '{"type":"object"}',
                 'bogus' => 'unexpected',
             ]],
             'resources' => [],
@@ -454,86 +385,145 @@ final class McpRegistryTest extends TestCase
         ]);
     }
 
-    // KINETIS-76 third follow-up: malformed inputSchemaObjectPaths
-    // artifacts — a hand-edited or otherwise corrupt compiled cache
-    // file, not something toArray() itself could ever produce — must be
-    // rejected loudly rather than silently misread.
+    // KINETIS-77: `inputSchemaJson` is a tool's whole schema as JSON
+    // text, and fromArray() has to refuse anything it cannot read back
+    // as the schema encodeSchema() wrote — a hand-edited, truncated or
+    // otherwise corrupt compiled cache file, never something toArray()
+    // could produce. McpRegistry::decodeSchema()'s own docblock states
+    // the contract; these tests drive real artifacts through
+    // fromArray() to hold it.
 
-    public function test_from_array_rejects_an_object_path_that_does_not_resolve_to_a_real_node(): void
+    /**
+     * @return array<string, mixed>
+     */
+    private static function artifactWithSchemaJson(mixed $inputSchemaJson): array
     {
-        $this->expectException(CacheArtifactExceptionInterface::class);
-
-        McpRegistry::fromArray([
+        return [
             'tools' => [[
-                'name' => 'broken',
+                'name' => 'corruptible',
                 'description' => '',
                 'controllerClass' => 'App\\C',
                 'controllerMethod' => 'run',
-                'inputSchema' => ['type' => 'object'],
-                'inputSchemaObjectPaths' => [['doesNotExist']],
+                'inputSchemaJson' => $inputSchemaJson,
             ]],
             'resources' => [],
-        ]);
+        ];
     }
 
-    public function test_from_array_rejects_an_object_path_that_traverses_a_non_array_node(): void
+    /**
+     * A document cut short — the realistic way a compiled file goes
+     * bad, from a partial write or a truncated copy.
+     */
+    public function test_from_array_rejects_an_input_schema_that_is_not_valid_json(): void
     {
-        $this->expectException(CacheArtifactExceptionInterface::class);
-
-        McpRegistry::fromArray([
-            'tools' => [[
-                'name' => 'broken',
-                'description' => '',
-                'controllerClass' => 'App\\C',
-                'controllerMethod' => 'run',
-                'inputSchema' => ['properties' => 'not-an-array'],
-                'inputSchemaObjectPaths' => [['properties', 'nested']],
-            ]],
-            'resources' => [],
-        ]);
-    }
-
-    public function test_from_array_rejects_a_non_string_object_path_segment(): void
-    {
-        // Asserted on the exact message, not just the exception type: a
-        // segment-shape check that's skipped entirely still reaches a
-        // *different* CacheArtifactExceptionInterface downstream (the
-        // int segment 42 fails castPathToObject()'s own "resolves to a
-        // real array node" check instead), which a class-only assertion
-        // can't tell apart from this check actually having done its job.
         $this->expectException(InvalidCacheArtifactException::class);
         $this->expectExceptionMessage(
-            'A compiled "McpRegistry tool" artifact has a malformed entry (a non-string path segment in "inputSchemaObjectPaths") — the cache is stale or corrupt.',
+            'A compiled "McpRegistry tool" artifact has a malformed entry (an "inputSchemaJson" value that is not '
+                . 'valid JSON) — the cache is stale or corrupt.',
         );
 
-        McpRegistry::fromArray([
-            'tools' => [[
-                'name' => 'broken',
-                'description' => '',
-                'controllerClass' => 'App\\C',
-                'controllerMethod' => 'run',
-                'inputSchema' => ['properties' => []],
-                'inputSchemaObjectPaths' => [[42]],
-            ]],
-            'resources' => [],
-        ]);
+        McpRegistry::fromArray(self::artifactWithSchemaJson('{"type":"object","properties":{"userId":{"type":"int'));
     }
 
-    public function test_from_array_rejects_an_object_path_entry_that_is_not_a_list(): void
+    /**
+     * Every JSON document whose root is not an object: an empty array,
+     * a populated array, a string, null, a number, a boolean. A tool
+     * input schema is a JSON object, so each of these describes
+     * something this class never stored — and the empty-array root
+     * matters most, since that is the value an artifact would carry if
+     * the schema's own type had been lost on the way out.
+     */
+    public function test_from_array_rejects_an_input_schema_whose_root_is_not_a_json_object(): void
     {
-        $this->expectException(CacheArtifactExceptionInterface::class);
+        foreach (['[]', '["type","object"]', '"object"', 'null', '42', 'true'] as $document) {
+            try {
+                McpRegistry::fromArray(self::artifactWithSchemaJson($document));
+                self::fail("Expected an InvalidCacheArtifactException for the root {$document}.");
+            } catch (InvalidCacheArtifactException $exception) {
+                self::assertSame(self::NOT_AN_OBJECT_ROOT_MESSAGE, $exception->getMessage());
+            }
+        }
+    }
 
-        McpRegistry::fromArray([
-            'tools' => [[
-                'name' => 'broken',
-                'description' => '',
-                'controllerClass' => 'App\\C',
-                'controllerMethod' => 'run',
-                'inputSchema' => ['properties' => []],
-                'inputSchemaObjectPaths' => 'not-a-list',
-            ]],
-            'resources' => [],
-        ]);
+    /**
+     * The one object shape a PHP array cannot hold apart from a list:
+     * members named by the consecutive indices a JSON array would have,
+     * which json_decode() returns as integer array keys and which would
+     * re-encode as `["userId"]`. encodeSchema() cannot write it — a PHP
+     * list is what becomes a JSON array to begin with — so it is
+     * refused rather than silently re-typed on the next compile.
+     */
+    public function test_from_array_rejects_a_schema_object_named_by_array_indices(): void
+    {
+        $this->expectException(InvalidCacheArtifactException::class);
+        $this->expectExceptionMessage(self::NUMERIC_MEMBER_NAME_MESSAGE);
+
+        McpRegistry::fromArray(self::artifactWithSchemaJson('{"type":"object","required":{"0":"userId"}}'));
+    }
+
+    /**
+     * The same check reaches any depth, and any member name PHP reads
+     * as a number — not only a run of them starting at zero.
+     */
+    public function test_from_array_rejects_a_nested_schema_object_with_a_numeric_member_name(): void
+    {
+        $this->expectException(InvalidCacheArtifactException::class);
+        $this->expectExceptionMessage(self::NUMERIC_MEMBER_NAME_MESSAGE);
+
+        McpRegistry::fromArray(self::artifactWithSchemaJson('{"properties":{"choice":{"enum":{"7":"x"}}}}'));
+    }
+
+    public function test_from_array_rejects_an_input_schema_that_is_not_a_string(): void
+    {
+        $this->expectException(InvalidCacheArtifactException::class);
+        $this->expectExceptionMessage(
+            'A compiled "McpRegistry tool" artifact\'s "inputSchemaJson" field is not a string — the cache is stale '
+                . 'or corrupt.',
+        );
+
+        McpRegistry::fromArray(self::artifactWithSchemaJson(['type' => 'object']));
+    }
+
+    /**
+     * The accepting side of the same contract, on one hand-built
+     * document: an empty object and three empty arrays at the same
+     * depth, plus an empty object inside a JSON array, each restored to
+     * its own type. A second toArray() pass re-derives the text from
+     * the restored value alone, so a compiled artifact is a fixed point
+     * rather than something that drifts every time it is rebuilt.
+     */
+    public function test_empty_objects_and_empty_arrays_in_one_document_each_keep_their_type(): void
+    {
+        $document = '{"type":"object","properties":{},"required":[],"choices":[],"anyOf":[{},{"type":"string"}]}';
+
+        $registry = McpRegistry::fromArray(self::artifactWithSchemaJson($document));
+        $tool = $registry->findTool('corruptible');
+
+        self::assertNotNull($tool);
+        self::assertInstanceOf(\stdClass::class, $tool->inputSchema['properties']);
+        self::assertSame([], $tool->inputSchema['required']);
+        self::assertSame([], $tool->inputSchema['choices']);
+        self::assertInstanceOf(\stdClass::class, $tool->inputSchema['anyOf'][0]);
+        self::assertSame(['type' => 'string'], $tool->inputSchema['anyOf'][1]);
+        self::assertSame($document, json_encode($tool->inputSchema, JSON_THROW_ON_ERROR));
+
+        self::assertSame($document, $registry->toArray()['tools'][0]['inputSchemaJson']);
+    }
+
+    /**
+     * The root is the one object whose JSON type comes from
+     * ToolDefinition::$inputSchema's array declaration rather than from
+     * the document, so a schema with no keys is written `{}`, read back
+     * as `[]`, and written `{}` again.
+     */
+    public function test_a_schema_with_no_keys_round_trips_as_an_empty_json_object(): void
+    {
+        $registry = McpRegistry::fromArray(self::artifactWithSchemaJson('{}'));
+        $tool = $registry->findTool('corruptible');
+
+        self::assertNotNull($tool);
+        self::assertSame([], $tool->inputSchema);
+        self::assertSame('{}', $registry->toArray()['tools'][0]['inputSchemaJson']);
     }
 
     // KINETIS-72: two genuinely different classes/methods must never be
@@ -717,8 +707,8 @@ final class McpRegistryTest extends TestCase
 
         McpRegistry::fromArray([
             'tools' => [
-                ['name' => 'ping', 'description' => 'first', 'controllerClass' => 'App\\A', 'controllerMethod' => 'ping', 'inputSchema' => [], 'inputSchemaObjectPaths' => []],
-                ['name' => 'ping', 'description' => 'second', 'controllerClass' => 'App\\B', 'controllerMethod' => 'ping', 'inputSchema' => [], 'inputSchemaObjectPaths' => []],
+                ['name' => 'ping', 'description' => 'first', 'controllerClass' => 'App\\A', 'controllerMethod' => 'ping', 'inputSchemaJson' => '{}'],
+                ['name' => 'ping', 'description' => 'second', 'controllerClass' => 'App\\B', 'controllerMethod' => 'ping', 'inputSchemaJson' => '{}'],
             ],
             'resources' => [],
         ]);

@@ -220,23 +220,26 @@ final class McpRegistry implements CacheableDiscoveryInterface
      * Used by Kinetis\Cache\Compiler, and — since McpRegistry is this
      * package's own CacheableDiscoveryInterface class — by
      * Kinetis\Cache\PluginDiscovery/CacheStore too, which write the
-     * result through var_export(). `inputSchema` is the one field that
-     * needs converting first: JsonSchema::forParameters() (a class/tool
-     * with zero parameters) and schemaForScalar() (a `mixed`-typed
-     * argument) both cast a genuinely empty schema to `(object) []`, so
-     * it JSON-encodes as `{}` rather than the invalid `[]` a bare PHP
-     * `[]` would produce — correct for the live wire response, but this
-     * codebase's own cache format never carries a live PHP object (the
-     * same "no live objects in the cache" discipline every other
-     * compiled artifact here follows), so normalizeSchemaForStorage()
-     * below converts every stdClass it finds, at any depth, into a
-     * plain empty array plus a separately-recorded structural path
-     * (`inputSchemaObjectPaths`) identifying where it was — never a
-     * reserved marker value living inside the schema data itself;
-     * fromArray()'s restoreSchemaFromStorage() counterpart restores the
-     * cast from those recorded paths.
+     * result through var_export().
+     *
+     * `inputSchema` is the one field that cannot be dumped as it
+     * stands. JSON Schema distinguishes the empty object `{}` from the
+     * empty array `[]`, and a PHP array expresses only one of the two:
+     * JsonSchema spells `{}` as a live `stdClass` — forParameters()'s
+     * `properties` for a class or tool with no parameters, and
+     * schemaForScalar()'s whole schema for a `mixed`-typed argument —
+     * while `required` and an `#[In([])]` enum are ordinary empty PHP
+     * arrays that have to stay arrays. A compiled artifact carries
+     * plain data only: CacheStore::assertExportable() refuses an object
+     * anywhere in a section before it is written, so a live stdClass
+     * never reaches disk. The artifact therefore carries the schema as
+     * `inputSchemaJson`, its own JSON text — a string is plain data,
+     * and JSON is the notation that tells the two empties apart, so the
+     * artifact holds one field with nothing alongside it to disagree
+     * with. fromArray()'s decodeSchema() reads it back.
      *
      * @return array{tools: list<array<string, mixed>>, resources: list<array<string, mixed>>}
+     * @throws \JsonException
      */
     public function toArray(): array
     {
@@ -258,19 +261,46 @@ final class McpRegistry implements CacheableDiscoveryInterface
 
     /**
      * @return array<string, mixed>
+     * @throws \JsonException
      */
     private static function toolToArray(ToolDefinition $tool): array
     {
-        $normalized = self::normalizeSchemaForStorage($tool->inputSchema);
-
         return [
             'name' => $tool->name,
             'description' => $tool->description,
             'controllerClass' => $tool->controllerClass,
             'controllerMethod' => $tool->controllerMethod,
-            'inputSchema' => $normalized['data'],
-            'inputSchemaObjectPaths' => $normalized['objectPaths'],
+            'inputSchemaJson' => self::encodeSchema($tool->inputSchema),
         ];
+    }
+
+    /**
+     * The schema as JSON text, and decodeSchema()'s inverse.
+     *
+     * The root is cast to an object so a schema carrying no keys still
+     * encodes as `{}`: ToolDefinition::$inputSchema is declared an
+     * array, so the root's JSON type comes from that declaration rather
+     * than from the data, and decodeSchema() applies the same rule in
+     * reverse. Every node below the root keeps the type it has.
+     *
+     * JSON_PRESERVE_ZERO_FRACTION keeps a float-valued constraint bound
+     * (`#[GreaterThan(1.0)]`) a float on the way back in, where the
+     * default encoding would write `1` and decode to an int. This text
+     * is the cache's own representation of the schema, not the bytes a
+     * transport puts on the wire: a transport encodes the whole
+     * `tools/list` response itself, without that flag, so the same
+     * bound goes out as `1`.
+     *
+     * A schema that cannot be encoded — a description holding bytes
+     * that are not valid UTF-8 — fails the build with json_encode()'s
+     * own JsonException rather than reaching disk degraded.
+     *
+     * @param array<string, mixed> $schema
+     * @throws \JsonException
+     */
+    private static function encodeSchema(array $schema): string
+    {
+        return json_encode((object) $schema, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION);
     }
 
     /**
@@ -282,16 +312,18 @@ final class McpRegistry implements CacheableDiscoveryInterface
      * apply to their own compiled entries — throwing
      * `Kinetis\Cache\Exception\InvalidCacheArtifactException` for
      * anything missing or wrong-typed, satisfying this class's own
-     * `CacheableDiscoveryInterface::fromArray()` contract. `inputSchema`
-     * is validated only as "present and an array" — its own deeply
-     * recursive JSON-Schema shape is never re-validated here, the same
-     * "don't re-derive an owning abstraction's own shape rules" scope
-     * `HttpCache::fromArray()` applies to `httpBindingPlans`/
-     * `hydrationPlans`. Also re-checks the same tool-name/resource-URI
-     * uniqueness invariant register() enforces live — `toArray()` itself
-     * never produces a colliding pair, but a hand-edited or otherwise
-     * corrupt compiled artifact could, and this must reject that rather
-     * than silently preserve whichever entry happened to be listed first
+     * `CacheableDiscoveryInterface::fromArray()` contract.
+     * `inputSchemaJson` is validated as a string that decodes into a
+     * JSON document this class can hold — see decodeSchema() — and no
+     * further: the schema's own deeply recursive JSON-Schema vocabulary
+     * is never re-validated here, the same "don't re-derive an owning
+     * abstraction's own shape rules" scope `HttpCache::fromArray()`
+     * applies to `httpBindingPlans`/`hydrationPlans`. Also re-checks
+     * the same tool-name/resource-URI uniqueness invariant register()
+     * enforces live — `toArray()` itself never produces a colliding pair, but a
+     * hand-edited or otherwise corrupt compiled artifact could, and this
+     * must reject that rather than silently preserve whichever entry
+     * happened to be listed first
      * — the exact ambiguity register()'s own atomicity exists to prevent.
      * Every controllerClass encountered also marks that class registered
      * ($registeredClasses), so a later live register() call for a class
@@ -315,11 +347,10 @@ final class McpRegistry implements CacheableDiscoveryInterface
         $seenToolNames = [];
 
         foreach ($tools as $tool) {
-            ArtifactValidation::exactKeys($tool, self::TOOL_ARTIFACT_COMPONENT, ['name', 'description', 'controllerClass', 'controllerMethod', 'inputSchema', 'inputSchemaObjectPaths']);
+            ArtifactValidation::exactKeys($tool, self::TOOL_ARTIFACT_COMPONENT, ['name', 'description', 'controllerClass', 'controllerMethod', 'inputSchemaJson']);
 
             $name = ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'name');
-            $inputSchema = ArtifactValidation::array($tool, self::TOOL_ARTIFACT_COMPONENT, 'inputSchema');
-            $objectPaths = self::extractObjectPaths($tool);
+            $inputSchemaJson = ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'inputSchemaJson');
             $controllerClass = ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'controllerClass');
 
             if (isset($seenToolNames[$name])) {
@@ -333,7 +364,7 @@ final class McpRegistry implements CacheableDiscoveryInterface
                 description: ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'description'),
                 controllerClass: $controllerClass,
                 controllerMethod: ArtifactValidation::string($tool, self::TOOL_ARTIFACT_COMPONENT, 'controllerMethod'),
-                inputSchema: self::restoreSchemaFromStorage($inputSchema, $objectPaths),
+                inputSchema: self::decodeSchema($inputSchemaJson),
             );
 
             /** @var class-string $controllerClass */
@@ -372,154 +403,120 @@ final class McpRegistry implements CacheableDiscoveryInterface
     }
 
     /**
-     * A `stdClass` anywhere in the schema tree (JsonSchema's own
-     * "encodes as `{}` not `[]`" convention — see JsonSchema::forParameters()'s
-     * and schemaForScalar()'s own docblocks, both of which produce one: a
-     * class/tool with zero parameters, and a `mixed`-typed one
-     * respectively) needs to survive the round trip through this
-     * codebase's own cache format, which never carries a live PHP object
-     * (the same "no live objects in the cache" discipline every other
-     * compiled artifact here follows). A blanket "restore any empty
-     * array back to an object" rule would be wrong the moment a
-     * genuinely empty JSON *array* value needs to survive the round trip
-     * unchanged (an empty `#[In([])]` enum, for one) — telling the two
-     * apart needs recording, per value, which of them it actually was.
+     * Rebuilds a live schema from the artifact's JSON text —
+     * encodeSchema()'s inverse, and the whole of what `inputSchemaJson`
+     * is validated for.
      *
-     * Recorded *structurally* — a separate list of key-paths
-     * (`objectPaths`), alongside the schema data itself, never as a
-     * reserved value living inside the schema data's own tree. An
-     * earlier version compared every string (then every exact-shaped
-     * array) value in the schema tree against a marker constant, which
-     * meant a real, user-supplied schema value — an `#[In]` enum choice,
-     * a `#[Regex]` pattern, a description, even a `required` field name
-     * — happening to equal that exact value would be wrongly restored as
-     * an object. This shape has no such risk at all, not just a
-     * narrowed one: restoreSchemaFromStorage() below casts back to
-     * `(object)` purely by walking to each recorded path, never by
-     * comparing a schema value against anything, so no schema value —
-     * regardless of what it happens to equal — can ever be mistaken for
-     * one.
+     * Decoding in object mode is what makes the representation
+     * unambiguous: `{}` arrives as an empty `stdClass` and `[]` as an
+     * empty array, so an empty `required` list, an `#[In([])]` enum's
+     * own empty choices, and an empty schema object are three distinct
+     * values before anything here looks at them, at any depth and in
+     * any combination. Nothing is inferred from a value, and there is
+     * no second field for the JSON text to disagree with.
      *
-     * @param array<string, mixed> $schema
-     * @return array{data: array<string, mixed>, objectPaths: list<list<string>>}
+     * normalizeDecodedNode() then restores the shape the live
+     * JsonSchema path builds — a JSON object's members as a keyed PHP
+     * array, an empty JSON object as the `stdClass` PHP has no other
+     * way to hold, a JSON array as a PHP list — so a tool loaded from
+     * the cache and one just discovered are the same value.
+     *
+     * Three things make the text unusable, and each rejects the whole
+     * artifact as InvalidCacheArtifactException so the framework's
+     * cache loaders fall back to live discovery and recompile rather
+     * than letting `tools/list` advertise — and `tools/call` validate
+     * against — a schema the application never declared: text that is
+     * not valid JSON, a document whose root is not a JSON object (every
+     * tool input schema is one), and the numeric member name
+     * normalizeDecodedObject() refuses.
+     *
+     * @return array<string, mixed>
+     * @throws InvalidCacheArtifactException
      */
-    private static function normalizeSchemaForStorage(array $schema): array
+    private static function decodeSchema(string $json): array
     {
-        $objectPaths = [];
-        $data = self::normalizeSchemaNode($schema, [], $objectPaths);
+        try {
+            $root = json_decode($json, associative: false, flags: JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            throw InvalidCacheArtifactException::malformedEntry(
+                self::TOOL_ARTIFACT_COMPONENT,
+                'an "inputSchemaJson" value that is not valid JSON',
+            );
+        }
 
-        /** @var array<string, mixed> $data */
-        return ['data' => $data, 'objectPaths' => $objectPaths];
+        if (!$root instanceof \stdClass) {
+            throw InvalidCacheArtifactException::malformedEntry(
+                self::TOOL_ARTIFACT_COMPONENT,
+                'an "inputSchemaJson" document whose root is not a JSON object',
+            );
+        }
+
+        $members = get_object_vars($root);
+
+        // The root is the one object whose JSON type comes from
+        // ToolDefinition::$inputSchema's own array declaration rather
+        // than from the data, which is why encodeSchema() casts it on
+        // the way out: `{}` here is a schema with no keys, not a value
+        // that has to stay an object.
+        return $members === [] ? [] : self::normalizeDecodedObject($members);
     }
 
     /**
-     * @param list<string> $path
-     * @param list<list<string>> $objectPaths
+     * One decoded node, put back into the form JsonSchema builds live.
      */
-    private static function normalizeSchemaNode(mixed $node, array $path, array &$objectPaths): mixed
+    private static function normalizeDecodedNode(mixed $node): mixed
     {
         if ($node instanceof \stdClass) {
-            $objectPaths[] = $path;
+            $members = get_object_vars($node);
 
-            // Every stdClass this codebase's own JsonSchema ever
-            // produces is genuinely empty (see this method's own
-            // docblock — a zero-parameter schema, or a `mixed`-typed
-            // argument's own schema) — so there's nothing inside it to
-            // walk further, and no need for a rule covering a stdClass
-            // recorded directly inside another recorded object path.
-            return [];
+            // The empty object is the one node a PHP array cannot
+            // express, so it stays the live object JsonSchema itself
+            // produces for it — see forParameters() and
+            // schemaForScalar().
+            return $members === [] ? $node : self::normalizeDecodedObject($members);
         }
 
         if (is_array($node)) {
-            $result = [];
-
-            foreach ($node as $key => $value) {
-                $result[$key] = self::normalizeSchemaNode($value, [...$path, (string) $key], $objectPaths);
-            }
-
-            return $result;
+            return array_map(self::normalizeDecodedNode(...), $node);
         }
 
         return $node;
     }
 
     /**
-     * @param array<string, mixed> $data
-     * @param list<list<string>> $objectPaths
+     * A non-empty JSON object's members, keyed the way the live schema
+     * keys them.
+     *
+     * json_decode() hands back a member name PHP reads as an integer
+     * ("0", "1", "-3") as an integer array key, and an array holding one
+     * re-encodes as a JSON array rather than the object it came from.
+     * encodeSchema() never writes such an object: every array in a live
+     * schema is either a string-keyed map or a list, and a list is what
+     * encodes as a JSON array to begin with. So a numeric member name
+     * means the artifact does not describe a schema this class wrote,
+     * and it is refused for the same reason every other unwritable
+     * shape here is.
+     *
+     * @param non-empty-array<array-key, mixed> $members
      * @return array<string, mixed>
+     * @throws InvalidCacheArtifactException
      */
-    private static function restoreSchemaFromStorage(array $data, array $objectPaths): array
+    private static function normalizeDecodedObject(array $members): array
     {
-        foreach ($objectPaths as $path) {
-            self::castPathToObject($data, $path);
-        }
+        $normalized = [];
 
-        return $data;
-    }
-
-    /**
-     * @param array<string, mixed> $data
-     * @param list<string> $path
-     */
-    private static function castPathToObject(array &$data, array $path): void
-    {
-        if ($path === []) {
-            // The top level is always a real array — ToolDefinition's own
-            // $inputSchema type, and JsonSchema::forParameters()'s own
-            // return type, guarantee it — so a recorded path can never
-            // legitimately be empty; only a hand-edited or otherwise
-            // corrupt artifact reaches this.
-            throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'an "inputSchemaObjectPaths" entry with no path segments');
-        }
-
-        $key = array_shift($path);
-
-        if (!array_key_exists($key, $data) || !is_array($data[$key])) {
-            throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'an "inputSchemaObjectPaths" entry that does not resolve to a real array node');
-        }
-
-        if ($path === []) {
-            $data[$key] = (object) $data[$key];
-
-            return;
-        }
-
-        /** @var array<string, mixed> $nested */
-        $nested = $data[$key];
-        self::castPathToObject($nested, $path);
-        $data[$key] = $nested;
-    }
-
-    /**
-     * @param array<array-key, mixed> $tool
-     * @return list<list<string>>
-     */
-    private static function extractObjectPaths(array $tool): array
-    {
-        $value = ArtifactValidation::array($tool, self::TOOL_ARTIFACT_COMPONENT, 'inputSchemaObjectPaths');
-
-        if (!array_is_list($value)) {
-            throw InvalidCacheArtifactException::wrongFieldType(self::TOOL_ARTIFACT_COMPONENT, 'inputSchemaObjectPaths', 'a list');
-        }
-
-        $paths = [];
-
-        foreach ($value as $path) {
-            if (!is_array($path) || !array_is_list($path)) {
-                throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'a non-list entry in "inputSchemaObjectPaths"');
+        foreach ($members as $name => $value) {
+            if (!is_string($name)) {
+                throw InvalidCacheArtifactException::malformedEntry(
+                    self::TOOL_ARTIFACT_COMPONENT,
+                    'an "inputSchemaJson" object with a numeric member name',
+                );
             }
 
-            foreach ($path as $segment) {
-                if (!is_string($segment)) {
-                    throw InvalidCacheArtifactException::malformedEntry(self::TOOL_ARTIFACT_COMPONENT, 'a non-string path segment in "inputSchemaObjectPaths"');
-                }
-            }
-
-            /** @var list<string> $path */
-            $paths[] = $path;
+            $normalized[$name] = self::normalizeDecodedNode($value);
         }
 
-        return $paths;
+        return $normalized;
     }
 
     public function findTool(string $name): ?ToolDefinition
