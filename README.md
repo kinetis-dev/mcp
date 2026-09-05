@@ -48,10 +48,14 @@ fresh request scope,
 transaction rollback for anything a tool leaves open, disposal once the
 response is written. The `mcp` middleware group authenticates the HTTP
 endpoint with the same middleware the auth packages ship for routes, and
-the identity they resolve reaches the tool. An unexpected exception — a
-tool, a resource, or the logger reporting either one — never crashes the
-server or reaches the client as anything more than a fixed, generic
-message; see the "Error handling" section at
+the identity they resolve reaches the tool; without one, `/mcp` answers
+`401` and dispatches nothing, unless `MCP_HTTP_PUBLIC=true` opens it. A
+deployment that pre-warms `.kinetis-cache/` runs `bin/kinetis build` in
+the deploy that upgrades this package, so its compiled `mcp` group
+carries the guard. An unexpected exception — a tool, a resource, or the
+logger reporting either one — never crashes the server or reaches the
+client as anything more than a fixed, generic message; see the "Error
+handling" section at
 [kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html).
 
 ## Provides
@@ -63,8 +67,10 @@ automatically, through the `extra.kinetis` declaration in its
 
 - **A command** on `vendor/bin/kinetis`: `mcp:serve`, the stdio
   transport.
-- **A route**: `POST /mcp`, the Streamable HTTP transport, with the
-  spec-required `Origin` validation as permanent middleware.
+- **A route**: `POST /mcp`, the Streamable HTTP transport, wrapped by
+  two permanent members of the `mcp` middleware group: the spec-required
+  `Origin` validation, and the identity guard that keeps the endpoint
+  closed to unauthenticated callers.
 - **Resources**: every page of Kinetis's own documentation, readable by
   any connected agent as `kinetis://docs/{slug}`.
 - **A service binding**: `McpServer`, built lazily on first use from
@@ -79,6 +85,7 @@ Read from the environment (or `.env`) via `Kinetis\Config`:
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `MCP_ALLOWED_ORIGINS` | *(empty)* | Comma-separated exact `Origin` values allowed on `/mcp`. Empty rejects any request that sends an `Origin` header at all; requests without one (CLI clients, server-to-server) always pass. |
+| `MCP_HTTP_PUBLIC` | `false` | Serves `/mcp` to unauthenticated callers. Left at `false`, a request no `mcp`-group middleware registered a `CurrentUserInterface` for is answered `401` before anything is dispatched — see the "Securing the HTTP transport" section at [kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html). |
 | `MCP_DISCOVERY_PATHS` | *(unset)* | Comma-separated sub-paths (relative to each PSR-4 base directory) restricting tool/resource discovery, for a large application that wants a bounded scan. |
 
 ## Installation
