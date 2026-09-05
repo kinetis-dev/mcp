@@ -1,0 +1,19 @@
+{
+    "packages": [
+        {
+            "name": "kinetis/mcp",
+            "install-path": "../../../../..",
+            "autoload": {
+                "psr-4": {
+                    "Kinetis\\Mcp\\": "src/"
+                }
+            },
+            "extra": {
+                "kinetis": {
+                    "scan": "Kinetis\\Mcp\\"
+                }
+            }
+        }
+    ],
+    "dev": false
+}
