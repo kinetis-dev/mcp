@@ -52,17 +52,11 @@ final readonly class McpController
     #[Post('/mcp')]
     public function serve(ServerRequestInterface $request): ResponseInterface
     {
-        // getContents(), never a (string) cast: MaxBodySizeMiddleware
-        // wraps this request's body in a SizeLimitedStream whose
-        // __toString() cannot throw (the interface it implements
-        // forbids it) and silently reports an empty string once the
-        // configured cap is exceeded — a string cast here would turn a
-        // real oversized-body rejection into a misleading "Parse
-        // error." response instead of the 413 that middleware exists
-        // to produce. getContents() is the one method that actually
-        // enforces the cap; letting BodyTooLargeException propagate
-        // uncaught is what lets that middleware's own catch turn it
-        // into the real response.
+        // The body reaching here is already bounded and complete:
+        // MaxBodySizeMiddleware settles the byte ceiling and stages the
+        // whole body before any handler runs, so an oversized request
+        // is a 413 that never arrives at this method and every way of
+        // reading what does arrive returns the same bytes.
         //
         // JsonRpcCodec::decode() is the same shared decode/structural-
         // validation path StdioTransport uses, run here *before* the
