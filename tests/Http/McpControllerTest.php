@@ -180,13 +180,11 @@ final class McpControllerTest extends TestCase
     /**
      * A well-formed, oversized JSON-RPC body — McpController::serve()
      * itself never gets far enough to answer "Parse error." for this
-     * one; MaxBodySizeMiddleware's backstop (SizeLimitedStream, enforced
-     * through getContents() rather than a string cast that would
-     * silently swallow the overage into "") must reject it as 413
-     * before McpServer ever sees a decoded message, and before the
-     * controller's own header check runs. No Content-Length header at
-     * all, so the declared-header fast path can't catch this either —
-     * only the actual-bytes-read backstop can.
+     * one. MaxBodySizeMiddleware stages and counts the body before any
+     * handler runs, so this is a 413 before McpServer ever sees a
+     * decoded message and before the controller's own header check
+     * runs. No Content-Length header at all, so the declared-header
+     * check cannot catch it either — only the staged byte count can.
      */
     public function test_an_oversized_mcp_body_with_no_content_length_is_rejected_with_413(): void
     {
