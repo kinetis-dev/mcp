@@ -53,7 +53,7 @@ final readonly class McpController
     public function serve(ServerRequestInterface $request): ResponseInterface
     {
         // The body reaching here is already bounded and complete:
-        // MaxBodySizeMiddleware settles the byte ceiling and stages the
+        // RequestBodyMiddleware settles the byte ceiling and stages the
         // whole body before any handler runs, so an oversized request
         // is a 413 that never arrives at this method and every way of
         // reading what does arrive returns the same bytes.

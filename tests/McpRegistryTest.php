@@ -116,8 +116,8 @@ final class McpRegistryTest extends TestCase
      * CacheStore, then require() back — returning the McpRegistry
      * section exactly as it comes off disk. Every cache round-trip test
      * here goes through this rather than calling toArray()/fromArray()
-     * back to back, since writeAll() is what would reject a live object
-     * with CacheWriteException in the first place.
+     * back to back, since write() is what would reject a live object
+     * with UnexportableArtifactException in the first place.
      *
      * @return array<string, mixed>
      */
@@ -145,17 +145,21 @@ final class McpRegistryTest extends TestCase
         );
 
         try {
-            $store->writeAll($compiled);
-            $pluginCache = $store->loadPlugins();
+            $store->write($compiled);
+            $reloaded = $store->load();
 
-            self::assertNotNull($pluginCache);
+            self::assertNotNull($reloaded);
 
             /** @var array<string, mixed> $data */
-            $data = $pluginCache->data[McpRegistry::class];
+            $data = $reloaded->plugins->data[McpRegistry::class];
 
             return $data;
         } finally {
-            CacheStore::destroy($directory);
+            foreach (glob($directory . '/*') ?: [] as $entry) {
+                is_dir($entry) ? @rmdir($entry) : @unlink($entry);
+            }
+
+            @rmdir($directory);
         }
     }
 

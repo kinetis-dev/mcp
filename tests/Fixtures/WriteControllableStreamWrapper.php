@@ -12,11 +12,10 @@ namespace Kinetis\Mcp\Tests\Fixtures;
  * returning false) against a real PHP resource, without needing a real
  * broken pipe to trigger either.
  *
- * Backed by a plain in-memory buffer plus a read position, the same
- * shape packages/storage's own FailingStreamWrapper already establishes
- * for the identical problem — after driving a transport against a
- * handle opened on this wrapper, the test rewinds and reads the buffer
- * back to assert exactly what bytes actually landed.
+ * Backed by a plain in-memory buffer plus a read position — after
+ * driving a transport against a handle opened on this wrapper, the test
+ * rewinds and reads the buffer back to assert exactly what bytes
+ * landed.
  *
  * Context options, all under the self::PROTOCOL key, all optional:
  * - writeReturns: list<int|false> — one forced return value per

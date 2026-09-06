@@ -173,13 +173,13 @@ final readonly class KinetisDocsResource
         return $this->read('queue-rabbitmq');
     }
 
-    #[McpResource(uri: 'kinetis://docs/storage', name: 'storage', description: 'kinetis/storage: file storage on League\Flysystem — a genuinely non-blocking, Amp\File-backed local adapter', mimeType: self::MIME_TYPE)]
+    #[McpResource(uri: 'kinetis://docs/storage', name: 'storage', description: 'kinetis/storage: file storage on League\Flysystem — an Amp\File-backed local adapter whose driver calls suspend the Fiber', mimeType: self::MIME_TYPE)]
     public function storage(): string
     {
         return $this->read('storage');
     }
 
-    #[McpResource(uri: 'kinetis://docs/storage-s3', name: 'storage-s3', description: 'kinetis/storage-s3: Amazon S3 (and S3-compatible) storage for kinetis/storage, non-blocking via kinetis/revolt-http-client', mimeType: self::MIME_TYPE)]
+    #[McpResource(uri: 'kinetis://docs/storage-s3', name: 'storage-s3', description: 'kinetis/storage-s3: Amazon S3 (and S3-compatible) storage for kinetis/storage, over the Revolt-native transport in kinetis/revolt-http-client', mimeType: self::MIME_TYPE)]
     public function storageS3(): string
     {
         return $this->read('storage-s3');
@@ -267,6 +267,12 @@ final readonly class KinetisDocsResource
     public function appendixContributing(): string
     {
         return $this->read('appendix-contributing');
+    }
+
+    #[McpResource(uri: 'kinetis://docs/redis', name: 'redis', description: 'kinetis/redis: a non-replaying, deadline-bounded Redis transport with TLS, authentication, and Redis Cluster slot routing — usable standalone', mimeType: self::MIME_TYPE)]
+    public function redis(): string
+    {
+        return $this->read('redis');
     }
 
     #[McpResource(uri: 'kinetis://docs/revolt-http-client', name: 'revolt-http-client', description: 'kinetis/revolt-http-client: a Revolt-native Symfony HttpClientInterface — usable standalone, no Kinetis required', mimeType: self::MIME_TYPE)]

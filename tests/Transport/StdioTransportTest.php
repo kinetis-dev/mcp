@@ -648,11 +648,10 @@ final class StdioTransportTest extends TestCase
 
     /**
      * A response whose write is only 10 bytes long on the first attempt
-     * — writeReturns [10, 0], the same shape packages/storage's own
-     * FailingStreamWrapper tests already use for the identical PHP
-     * behavior (a single userland fwrite() call can genuinely return
-     * less than requested once the underlying stream's own internal
-     * retry gives up at a zero-progress attempt) — must still arrive as
+     * — writeReturns [10, 0], the shape the identical PHP behavior takes
+     * (a single userland fwrite() call can return less than requested
+     * once the underlying stream's own internal retry gives up at a
+     * zero-progress attempt) — must still arrive as
      * exactly one complete, correctly-framed, decodable line, proving
      * writeFrame()'s own loop resumes and finishes the write. Confirmed
      * this genuinely distinguishes the fixed code from the original
@@ -722,9 +721,7 @@ final class StdioTransportTest extends TestCase
      * writeReturns is [10, 0, false], not [10, false]: PHP's own stream
      * layer already retries a short/zero-progress stream_write()
      * internally, within a single userland fwrite() call, up to the
-     * first zero-progress attempt — confirmed directly, not assumed,
-     * the same discipline packages/storage's own FailingStreamWrapper
-     * tests already document for the identical PHP behavior. [10, false]
+     * first zero-progress attempt. [10, false]
      * alone lets that internal retry consume both entries within one
      * fwrite() call and report the accumulated 10 as an ordinary partial
      * success, so writeFrame()'s own loop simply continues and the
