@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Kinetis\Mcp\Tests\Http;
 
-use Kinetis\Cache\CacheFormat;
 use Kinetis\Cache\Compiler;
 use Kinetis\Cache\HttpCache;
 use Kinetis\Config\Config;
@@ -430,8 +429,6 @@ final class McpIdentityGuardMiddlewareTest extends TestCase
 
         $compiled = new Compiler()->compile($router, middleware: ['groups' => ['mcp' => $this->discoveredGroup()]]);
         $restored = HttpCache::fromArray($compiled->http->toArray());
-
-        self::assertSame(CacheFormat::VERSION, $restored->formatVersion);
 
         return $restored->middlewareGroups['mcp'];
     }

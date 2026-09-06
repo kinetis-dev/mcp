@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Kinetis\Mcp\Tests;
 
 use Kinetis\Cache\CacheableDiscoveryInterface;
-use Kinetis\Cache\CacheFormat;
 use Kinetis\Cache\Exception\CacheArtifactExceptionInterface;
 use Kinetis\Cache\Exception\InvalidCacheArtifactException;
 use Kinetis\Cache\CacheStore;
@@ -127,21 +126,15 @@ final class McpRegistryTest extends TestCase
         $store = new CacheStore($directory);
         $compiled = new CompiledCache(
             http: new HttpCache(
-                formatVersion: CacheFormat::VERSION,
                 routes: [],
                 httpBindingPlans: [],
                 hydrationPlans: [],
                 globalMiddleware: [],
                 openApiMiddleware: [],
-                compiledAt: '2026-01-01T00:00:00+00:00',
             ),
-            commands: new CommandCache(formatVersion: CacheFormat::VERSION, commands: [], compiledAt: '2026-01-01T00:00:00+00:00'),
-            events: new EventCache(formatVersion: CacheFormat::VERSION, listeners: [], compiledAt: '2026-01-01T00:00:00+00:00'),
-            plugins: new PluginCache(
-                formatVersion: CacheFormat::VERSION,
-                data: [McpRegistry::class => $live->toArray()],
-                compiledAt: '2026-01-01T00:00:00+00:00',
-            ),
+            commands: new CommandCache([]),
+            events: new EventCache([]),
+            plugins: new PluginCache([McpRegistry::class => $live->toArray()]),
         );
 
         try {
