@@ -20,20 +20,6 @@ final class McpDiscoveryTest extends TestCase
         return __DIR__ . '/Fixtures/Project';
     }
 
-    /**
-     * This package's own root doubles as a project whose composer.json
-     * maps Kinetis\Mcp — which is how KinetisDocsResource is discovered
-     * when developing the package itself. In a consumer install the same
-     * class arrives through this package's extra.kinetis scan root
-     * instead.
-     */
-    public function test_discovers_the_built_in_kinetis_docs_resource(): void
-    {
-        $registry = McpDiscovery::discover(dirname(__DIR__));
-
-        self::assertNotNull($registry->findResource('kinetis://docs/index'));
-    }
-
     public function test_discovers_a_projects_own_tools_anywhere_under_its_psr4_root(): void
     {
         $registry = McpDiscovery::discover($this->fixtureProject());
@@ -76,23 +62,5 @@ final class McpDiscoveryTest extends TestCase
         } finally {
             putenv('MCP_DISCOVERY_PATHS');
         }
-    }
-
-    /**
-     * The package root is both the project and the location of
-     * KinetisDocsResource, so the class surfaces from more than one scan
-     * pass. McpRegistry::register() is idempotent per class on its own —
-     * registering the same class twice is a safe no-op — so this stays
-     * correct with or without McpDiscovery's own $seen-based dedup; that
-     * dedup exists purely to avoid reflecting the class twice, not to
-     * prevent a duplicate resource.
-     */
-    public function test_discovering_against_this_package_root_does_not_duplicate_the_docs_resource(): void
-    {
-        $registry = McpDiscovery::discover(dirname(__DIR__));
-
-        $matches = array_filter($registry->resources(), static fn ($resource): bool => $resource->uri === 'kinetis://docs/index');
-
-        self::assertCount(1, $matches);
     }
 }

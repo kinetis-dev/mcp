@@ -10,13 +10,11 @@ use Kinetis\Cache\PackageDiscovery;
 /**
  * Builds a McpRegistry from every class found in a project — no
  * namespace/directory convention required — plus every class found under
- * Kinetis\Mcp specifically (framework-provided resources, e.g.
- * KinetisDocsResource), rather than requiring an explicit mcp.php
- * registration file. Kinetis\Mcp itself also contains plenty of
- * non-resource framework internals (McpServer, McpDispatcher, the
- * attribute classes, ...); registering one of those is a harmless no-op,
- * the same as McpRegistry::register() already is for any class with no
- * #[McpTool]/#[McpResource]-attributed method.
+ * Kinetis\Mcp specifically, rather than requiring an explicit mcp.php
+ * registration file. Kinetis\Mcp holds framework internals (McpServer,
+ * McpDispatcher, the attribute classes, ...); registering one of those
+ * is a harmless no-op, the same as McpRegistry::register() already is
+ * for any class with no #[McpTool]/#[McpResource]-attributed method.
  *
  * $paths restricts the project-wide scan to one or more sub-paths
  * (relative to each PSR-4 base directory) instead of scanning the whole

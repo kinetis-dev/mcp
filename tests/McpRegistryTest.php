@@ -302,11 +302,11 @@ final class McpRegistryTest extends TestCase
 
     public function test_compile_delegates_to_discovery_and_reduces_it_to_plain_data(): void
     {
-        $data = McpRegistry::compile(dirname(__DIR__));
+        $data = McpRegistry::compile(__DIR__ . '/Fixtures/Project');
 
         $reloaded = McpRegistry::fromArray($data);
 
-        self::assertNotNull($reloaded->findResource('kinetis://docs/index'));
+        self::assertNotNull($reloaded->findTool('discovered_ping'));
     }
 
     /**

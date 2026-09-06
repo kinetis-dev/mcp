@@ -71,8 +71,6 @@ automatically, through the `extra.kinetis` declaration in its
   two permanent members of the `mcp` middleware group: the spec-required
   `Origin` validation, and the identity guard that keeps the endpoint
   closed to unauthenticated callers.
-- **Resources**: every page of Kinetis's own documentation, readable by
-  any connected agent as `kinetis://docs/{slug}`.
 - **A service binding**: `McpServer`, built lazily on first use from
   your application's own discovered tools and resources.
 
