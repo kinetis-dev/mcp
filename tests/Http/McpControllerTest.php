@@ -124,8 +124,9 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * The /mcp endpoint is a literal comparison rather than a registered
-     * route, so it needs the request path normalised on its own account.
+     * `/mcp` is an ordinary Router route, and the Router normalises the
+     * trailing slash on both the registered path and the request path, so
+     * `/mcp/` reaches the same controller without a redirect.
      */
     public function test_mcp_endpoint_answers_with_a_trailing_slash_too(): void
     {
