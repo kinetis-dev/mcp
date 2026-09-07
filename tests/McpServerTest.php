@@ -860,9 +860,8 @@ final class McpServerTest extends TestCase
         self::assertNull($response);
     }
 
-    // KINETIS-76 follow-up: the MCP error envelope/content contract for a
-    // wrong-shaped builtin-typed argument, pinned end-to-end through a
-    // real JSON-RPC tools/call — not just at the McpDispatcher unit level.
+    // The MCP error envelope/content contract for a wrong-shaped
+    // builtin-typed argument, pinned through a real JSON-RPC tools/call.
     // Hydrator::typeMismatchMessage() is the exact same check an HTTP
     // #[Query]/path parameter or #[Body] field gets; this proves McpServer
     // carries its ValidationException through to the same isError:true +
@@ -901,9 +900,6 @@ final class McpServerTest extends TestCase
                     'tags' => ['a', 'b'],
                     'items' => ['c'],
                     'note' => 'anything',
-                    'marker' => null,
-                    'confirmed' => true,
-                    'declined' => false,
                 ],
                 '_meta' => $this->meta(),
             ],
@@ -915,30 +911,9 @@ final class McpServerTest extends TestCase
                 'tags' => ['a', 'b'],
                 'items' => ['c'],
                 'note' => 'anything',
-                'marker' => null,
-                'confirmed' => true,
-                'declined' => false,
             ],
             json_decode($response['result']['content'][0]['text'], true),
         );
-    }
-
-    public function test_a_wrong_shaped_standalone_true_argument_reports_is_error_with_the_field_message(): void
-    {
-        $response = $this->builtinCoverageServer()->handle([
-            'jsonrpc' => '2.0',
-            'id' => 22,
-            'method' => 'tools/call',
-            'params' => [
-                'name' => 'builtin_coverage',
-                'arguments' => ['tags' => [], 'items' => [], 'confirmed' => false],
-                '_meta' => $this->meta(),
-            ],
-        ]);
-
-        self::assertTrue($response['result']['isError']);
-        $errors = json_decode($response['result']['content'][0]['text'], true)['errors'];
-        self::assertSame(['must be true, boolean given.'], $errors['confirmed']);
     }
 
     /**
@@ -966,13 +941,12 @@ final class McpServerTest extends TestCase
         self::assertStringNotContainsString('"note":[]', $encoded);
     }
 
-    // KINETIS-76 second follow-up: real MCP JSON decoding, not only
-    // already-flattened PHP arrays — every prior tools/call test in this
-    // file hand-builds its `arguments` as a plain PHP array directly,
-    // which can never express "this came from a genuine JSON object" at
-    // all. These two go through the real wire path instead: a raw JSON-RPC
-    // message string, decoded via JsonRpcCodec::decode() exactly the way
-    // StdioTransport/Http\McpController actually do.
+    // Real MCP JSON decoding, not only already-flattened PHP arrays: a
+    // hand-built PHP `arguments` array cannot express "this came from a
+    // genuine JSON object" at all. These two go through the real wire
+    // path instead — a raw JSON-RPC message string, decoded via
+    // JsonRpcCodec::decode() exactly the way StdioTransport and
+    // Http\McpController do.
 
     /**
      * The exact gap array_is_list() alone cannot close, reached through

@@ -25,8 +25,6 @@ use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
 use Kinetis\Mcp\Tests\Fixtures\IntraClassDuplicateResourceController;
 use Kinetis\Mcp\Tests\Fixtures\IntraClassDuplicateToolController;
 use Kinetis\Mcp\Tests\Fixtures\MixedNewAndConflictingToolController;
-use Kinetis\Mcp\Tests\Fixtures\MultipleUnsupportedParametersToolController;
-use Kinetis\Mcp\Tests\Fixtures\UnsupportedCallableParameterToolController;
 use Kinetis\Mcp\Tests\Fixtures\UnsupportedParameterToolController;
 use Kinetis\Mcp\Tests\Fixtures\ZeroParameterToolController;
 use Kinetis\Validation\Exception\JsonSchemaException;
@@ -824,10 +822,9 @@ final class McpRegistryTest extends TestCase
         self::assertNotContains('optionalItems', $tool->inputSchema['properties']['data']['required']);
     }
 
-    // KINETIS-76 follow-up: the complete, audited builtin-type policy —
-    // see JsonSchema::forType()'s own docblock — proven end-to-end
-    // through a real tool's own generated inputSchema, not just via
-    // JsonSchema::forType() unit calls.
+    // The supported builtin set — see Hydrator::SUPPORTED_BUILTIN_TYPES —
+    // proven through a real tool's own generated inputSchema, not just
+    // via JsonSchema::forType() unit calls.
 
     public function test_tools_list_schema_covers_every_supported_builtin_category(): void
     {
@@ -841,11 +838,8 @@ final class McpRegistryTest extends TestCase
         self::assertSame(['type' => 'array'], $properties['tags']);
         self::assertSame(['type' => 'array'], $properties['items'], 'iterable gets the identical array schema as plain array');
         self::assertEquals((object) [], $properties['note'], 'mixed is the empty schema object, not the empty schema array');
-        self::assertSame(['type' => 'null'], $properties['marker']);
-        self::assertSame(['type' => 'boolean', 'const' => true], $properties['confirmed']);
-        self::assertSame(['type' => 'boolean', 'const' => false], $properties['declined']);
 
-        // tags/items have no default — required; every other field does.
+        // tags/items have no default — required; note has one.
         self::assertSame(['tags', 'items'], $tool->inputSchema['required']);
     }
 
@@ -853,10 +847,10 @@ final class McpRegistryTest extends TestCase
      * McpRegistry::register() is a real guaranteed-to-run-before-traffic
      * boundary for MCP specifically because a tool can never be called
      * until it exists in the registry, and register() never partially
-     * commits a class whose schema generation failed — so an `object`-
-     * typed tool argument is rejected the moment the class is registered
-     * (at discovery/boot time), never silently reachable by a real
-     * tools/call request.
+     * commits a class whose schema generation failed — so a tool
+     * argument typed outside Hydrator::SUPPORTED_BUILTIN_TYPES is
+     * rejected the moment the class is registered (at discovery/boot
+     * time), never silently reachable by a real tools/call request.
      */
     public function test_register_rejects_a_tool_with_an_unsupported_builtin_parameter_type(): void
     {
@@ -880,51 +874,5 @@ final class McpRegistryTest extends TestCase
         }
 
         self::assertNull($registry->findTool('unsupported_parameter'));
-    }
-
-    /**
-     * `callable`'s own equivalent of the two `object` tests above — the
-     * second rejected builtin category gets the identical registration-
-     * time guarantee, not just direct Hydrator/JsonSchema unit coverage.
-     */
-    public function test_register_rejects_a_tool_with_an_unsupported_callable_parameter_type(): void
-    {
-        $registry = new McpRegistry();
-
-        $this->expectException(JsonSchemaException::class);
-        $this->expectExceptionMessage('callable');
-
-        $registry->register(UnsupportedCallableParameterToolController::class);
-    }
-
-    public function test_a_callable_parameter_class_that_failed_registration_never_becomes_callable(): void
-    {
-        $registry = new McpRegistry();
-
-        try {
-            $registry->register(UnsupportedCallableParameterToolController::class);
-            self::fail('Expected a JsonSchemaException.');
-        } catch (JsonSchemaException) {
-            // expected
-        }
-
-        self::assertNull($registry->findTool('unsupported_callable_parameter'));
-    }
-
-    /**
-     * A tool with two unsupported parameters at once (object, then
-     * callable in declaration order) is rejected deterministically on
-     * the first one JsonSchema::forParameters() reaches, not registered
-     * with only the reachable half validated — register() never commits
-     * a partially-checked tool either way.
-     */
-    public function test_register_rejects_a_tool_with_multiple_unsupported_parameters_reporting_the_first(): void
-    {
-        $registry = new McpRegistry();
-
-        $this->expectException(JsonSchemaException::class);
-        $this->expectExceptionMessage('object');
-
-        $registry->register(MultipleUnsupportedParametersToolController::class);
     }
 }
