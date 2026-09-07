@@ -12,7 +12,7 @@ use RuntimeException;
  * An AppScope::bind(LoggerInterface::class, ...) factory that succeeds
  * $succeeds times — for whatever eagerly resolves LoggerInterface ahead
  * of the call under test (ExceptionHandlerMiddleware's own construction,
- * Kernel's/StdioTransport's/McpController's own TransactionGuardHook
+ * Kernel's/StdioTransport's own TransactionGuardHook
  * calls, via TransactionGuard's own constructor dependency when
  * kinetis/persistence is installed alongside kinetis/mcp) — and throws
  * on every resolution after that, proving a disposal-failure log call
