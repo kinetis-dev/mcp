@@ -4,23 +4,16 @@ declare(strict_types=1);
 
 namespace Kinetis\Mcp\Http;
 
-use Kinetis\Container\AppScope;
 use Kinetis\Container\RequestScope;
-use Kinetis\Container\TransactionGuardHook;
 use Kinetis\Http\Attributes\Middleware;
 use Kinetis\Http\Attributes\Post;
-use Kinetis\Http\CurrentUserInterface;
 use Kinetis\Http\StreamedResponse;
-use Kinetis\Logging\SafeLogger;
 use Kinetis\Mcp\Exception\JsonRpcException;
 use Kinetis\Mcp\JsonRpcCodec;
 use Kinetis\Mcp\McpServer;
 use Nyholm\Psr7\Response;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
-use Psr\Log\LoggerInterface;
-use Psr\Log\LogLevel;
-use Throwable;
 
 /**
  * MCP's Streamable HTTP transport as an ordinary route, which is what
@@ -55,8 +48,11 @@ final readonly class McpController
         // The body reaching here is already bounded and complete:
         // RequestBodyMiddleware settles the byte ceiling and stages the
         // whole body before any handler runs, so an oversized request
-        // is a 413 that never arrives at this method and every way of
-        // reading what does arrive returns the same bytes.
+        // is a 413 that never arrives at this method. Cast rather than
+        // getContents(): the staged stream is seekable and replayable,
+        // and the cast is the representation that rewinds first, so a
+        // middleware that already inspected the body leaves the whole
+        // envelope readable here rather than an empty remainder.
         //
         // JsonRpcCodec::decode() is the same shared decode/structural-
         // validation path StdioTransport uses, run here *before* the
@@ -64,7 +60,7 @@ final readonly class McpController
         // the same JSON-RPC code/id semantics regardless of transport,
         // never a header-mismatch response for a body that was never a
         // valid request to begin with.
-        $decoded = JsonRpcCodec::decode($request->getBody()->getContents());
+        $decoded = JsonRpcCodec::decode((string) $request->getBody());
 
         if (\array_key_exists('errorResponse', $decoded)) {
             return $this->json($decoded['errorResponse'], $this->httpStatus($decoded['errorResponse']));
@@ -176,30 +172,15 @@ final readonly class McpController
      * before the body starts streaming, so any JSON-RPC error surfaces
      * inside the final event's payload instead.
      *
-     * The emitter runs after dispatchCore() has disposed this request's
-     * scope — the runtime writes the response once handle() has
-     * returned — so the streamed call gets a scope of its own, alive
-     * until after the final event, with the same rollback hook. What an
-     * `mcp`-group middleware published as the caller's identity is
-     * carried across to it: the middleware ran against this request's
-     * scope, and the tool resolves from the stream's.
-     *
-     * Carried across under both `CurrentUserInterface` and, when the same
-     * instance was *also* explicitly registered under its own concrete
-     * class in the original scope, that concrete class too —
-     * `kinetis/auth-jwt`'s `JwtAuthMiddleware` does exactly this (a
-     * controller needing a claim only `JwtUser` itself exposes, `jti` for
-     * revocation most commonly, injects the concrete class directly
-     * rather than the interface), and any other middleware following the
-     * identical pattern gets the same treatment — this package has no
-     * dependency on either auth package and never needs one, since the
-     * mechanism only ever asks the original scope "what else, if
-     * anything, resolves to this exact object." Without carrying the
-     * concrete alias too, a tool typed against the concrete class (rather
-     * than the interface) would either autowire a disconnected instance
-     * or fail outright the moment a client asked for progress, despite
-     * working identically without it — the exact inconsistency this
-     * package's own docs must never claim doesn't exist.
+     * The emitter dispatches on the very scope injected here, which
+     * Kernel keeps alive until the stream is emitted or abandoned and
+     * disposes exactly once through its own lease. So a streamed call
+     * resolves from the same container an ordinary one does: whatever an
+     * `mcp`-group middleware published — an identity under any number of
+     * ids, or anything else request-scoped — is simply already there,
+     * and the rollback hook Kernel registered covers the tool the same
+     * way. Nothing about the scope's lifetime is this package's to
+     * decide; see {@see \Kinetis\Http\StreamScopeLease}.
      *
      * @param array<string, mixed> $decoded
      */
@@ -210,31 +191,10 @@ final readonly class McpController
             'X-Accel-Buffering' => 'no',
         ]);
 
-        $currentUser = $this->scope->isRegistered(CurrentUserInterface::class)
-            ? $this->scope->get(CurrentUserInterface::class)
-            : null;
-
-        // Only ever carried forward when the *original* scope already
-        // guaranteed both ids resolve to this exact instance — this is a
-        // preservation of an existing binding, never the introduction of
-        // a new one, so an object whose concrete class was never
-        // separately registered (the plain kinetis/auth BearerAuthMiddleware
-        // case, among others) carries only the interface id, exactly as
-        // before this fix.
-        $currentUserConcreteClass = null;
-
-        if ($currentUser instanceof CurrentUserInterface) {
-            $concreteClass = $currentUser::class;
-
-            if ($this->scope->isRegistered($concreteClass) && $this->scope->get($concreteClass) === $currentUser) {
-                $currentUserConcreteClass = $concreteClass;
-            }
-        }
-
-        $app = $this->scope->appScope();
         $mcp = $this->mcp;
+        $scope = $this->scope;
 
-        $emitter = static function () use ($mcp, $decoded, $app, $currentUser, $currentUserConcreteClass): void {
+        $emitter = static function () use ($mcp, $decoded, $scope): void {
             $write = static function (array $payload): void {
                 echo 'data: ' . \json_encode($payload, JSON_THROW_ON_ERROR) . "\n\n";
 
@@ -253,80 +213,27 @@ final readonly class McpController
                 ]);
             };
 
-            $scope = $app->createRequestScope();
-
             // $mcp->handle() never throws — the same top-level
             // containment as the stdio transport, and every JSON-RPC
             // response it builds is itself already json_encode()d and
             // caught internally before being embedded as text
             // (McpServer::callTool()/handle()) — so $response is always
             // both the real, already-computed outcome and already safe
-            // to encode again here. TransactionGuardHook::
-            // registerIfAvailable() and write()'s own output step can
-            // still genuinely fail: a broken container binding resolving
-            // one of TransactionGuard's own dependencies, or — the write
-            // step specifically — an ob_start() output-buffer handler
+            // to encode again here. write()'s own output step can still
+            // genuinely fail: an ob_start() output-buffer handler
             // installed further up the call stack throwing when write()'s
             // own @ob_flush() invokes it (`@` suppresses PHP warnings,
-            // not a real thrown exception, so it reaches this path
-            // unchanged). Either failure propagates as the real primary
-            // failure here. disposeStreamScope() below is guaranteed non-throwing
-            // (see its own docblock), which is what makes it safe to run
-            // in this finally regardless of what inside the try block
-            // failed — a `finally` block is only dangerous when the
-            // block itself can throw. Every setup step that touches
-            // $scope is inside this try, not just the write, so the
-            // scope always gets disposed even when one of them fails.
-            try {
-                if ($currentUser instanceof CurrentUserInterface) {
-                    $scope->instance(CurrentUserInterface::class, $currentUser);
+            // not a real thrown exception, so it reaches the caller
+            // unchanged). That failure is the primary one, and the lease
+            // wrapping this emitter still disposes the scope around it.
+            $response = $mcp->handle($decoded, $onNotification, $scope);
 
-                    if ($currentUserConcreteClass !== null) {
-                        $scope->instance($currentUserConcreteClass, $currentUser);
-                    }
-                }
-
-                TransactionGuardHook::registerIfAvailable($scope);
-
-                $response = $mcp->handle($decoded, $onNotification, $scope);
-
-                if ($response !== null) {
-                    $write($response);
-                }
-            } finally {
-                self::disposeStreamScope($scope, $app);
+            if ($response !== null) {
+                $write($response);
             }
         };
 
         return new StreamedResponse($inner, $emitter);
-    }
-
-    /**
-     * Disposes $scope, used only by stream()'s emitter — guaranteed
-     * never to throw, which is what makes it safe to call from inside the
-     * emitter's own finally regardless of whether the final event was
-     * successfully written or the write itself failed. A cleanup failure
-     * here is never allowed to escape and abort the stream over what is,
-     * at this point, only ever server diagnostics — never a second SSE
-     * event. Logged through SafeLogger::logFrom(), not log(): resolving
-     * LoggerInterface from $app (AppScope) is itself covered by the same
-     * containment as the logger's own log() call — $scope is already
-     * disposed by the time a cleanup failure could occur, so it can no
-     * longer resolve one safely, and a throwing LoggerInterface binding/
-     * factory on AppScope must not be able to escape here either.
-     */
-    private static function disposeStreamScope(RequestScope $scope, AppScope $app): void
-    {
-        try {
-            $scope->dispose();
-        } catch (Throwable $disposeFailure) {
-            SafeLogger::logFrom(
-                fn (): LoggerInterface => $app->get(LoggerInterface::class),
-                LogLevel::ERROR,
-                'Request scope disposal failed while streaming an MCP progress response, after the final event was already computed: {message}',
-                ['message' => $disposeFailure->getMessage(), 'exception' => $disposeFailure],
-            );
-        }
     }
 
     /**

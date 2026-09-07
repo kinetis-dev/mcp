@@ -19,17 +19,16 @@ use Kinetis\Mcp\Tests\Fixtures\DisposalFailingToolController;
 use Kinetis\Mcp\Tests\Fixtures\DisposalRecorder;
 use Kinetis\Mcp\Tests\Fixtures\GlobalMiddleware;
 use Kinetis\Mcp\Tests\Fixtures\IdentityReportingController;
-use Kinetis\Mcp\Tests\Fixtures\IdentityViaBothController;
-use Kinetis\Mcp\Tests\Fixtures\IdentityViaConcreteController;
-use Kinetis\Mcp\Tests\Fixtures\IdentityViaInterfaceController;
 use Kinetis\Mcp\Tests\Fixtures\InMemoryLogger;
 use Kinetis\Mcp\Tests\Fixtures\McpGroupMiddleware;
 use Kinetis\Mcp\Tests\Fixtures\NotificationExecutionRecorder;
 use Kinetis\Mcp\Tests\Fixtures\ProgressNotificationToolController;
 use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
-use Kinetis\Mcp\Tests\Fixtures\PublishesDualIdentityMiddleware;
+use Kinetis\Mcp\Tests\Fixtures\PublishesRequestNoteMiddleware;
 use Kinetis\Mcp\Tests\Fixtures\PublishesUserMiddleware;
+use Kinetis\Mcp\Tests\Fixtures\ReadsBodyMiddleware;
 use Kinetis\Mcp\Tests\Fixtures\RecordingMiddleware;
+use Kinetis\Mcp\Tests\Fixtures\RequestNoteReportingController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingLogger;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingResourceController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowsAfterFirstResolutionLogger;
@@ -254,6 +253,38 @@ final class McpControllerTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
         $body = json_decode((string) $response->getBody(), true);
         self::assertSame('get_user_status', $body['result']['tools'][0]['name']);
+    }
+
+    /**
+     * A middleware that inspected the staged body leaves its cursor at
+     * the end, where `getContents()` answers with an empty string. The
+     * controller reads the replayable full representation instead, so
+     * the whole envelope — arguments included — still reaches the tool.
+     */
+    public function test_the_whole_envelope_reaches_the_tool_after_a_middleware_read_the_body(): void
+    {
+        ReadsBodyMiddleware::$bytesRead = 0;
+
+        $kernel = $this->mcpEnabledKernel([ReadsBodyMiddleware::class]);
+
+        $response = $kernel->handle($this->mcpRequest([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'tools/call',
+            'params' => [
+                'name' => 'create_user',
+                'arguments' => ['data' => ['name' => 'Alon', 'email' => 'alon@example.com']],
+            ],
+        ]));
+
+        self::assertGreaterThan(0, ReadsBodyMiddleware::$bytesRead, 'the middleware has to have drained the body for this to prove anything');
+
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getBody(), true);
+        self::assertSame(
+            ['name' => 'Alon', 'email' => 'alon@example.com'],
+            json_decode($body['result']['content'][0]['text'], true),
+        );
     }
 
     // --- /mcp Origin validation and #[AsMcpMiddleware]/
@@ -1137,11 +1168,9 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * The streamed call runs after the request's scope is disposed, on a
-     * scope of its own — and the identity an `mcp`-group middleware
-     * published on the request's scope has to reach the tool there too,
-     * or authentication would silently stop working the moment a client
-     * asks for progress.
+     * The identity an `mcp`-group middleware published has to reach the
+     * tool on the streamed path too, or authentication would silently
+     * stop working the moment a client asks for progress.
      */
     public function test_a_streamed_call_still_sees_the_identity_the_middleware_published(): void
     {
@@ -1179,13 +1208,6 @@ final class McpControllerTest extends TestCase
         self::assertSame(['caller' => 'agent-7'], $result);
     }
 
-    // KINETIS-74: a middleware that (like kinetis/auth-jwt's
-    // JwtAuthMiddleware) publishes the same authenticated instance under
-    // both CurrentUserInterface and its own concrete class must have both
-    // survive into the streamed scope, resolving to the exact same
-    // object — not just CurrentUserInterface, which was already carried
-    // across before this fix.
-
     /**
      * @return array<string, mixed>
      */
@@ -1209,139 +1231,50 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * @return array{0: AppScope, 1: Router}
+     * Identity is only the most visible case. A streamed call dispatches
+     * on the request's own scope, so *anything* an `mcp`-group middleware
+     * registered on it is there for the tool to inject, and a streamed
+     * call reports exactly what an ordinary one does. A scope of the
+     * stream's own would autowire a fresh RequestNote instead, carrying
+     * its default text.
      */
-    private function dualIdentityAppAndRouter(string $controllerClass): array
+    public function test_a_streamed_call_sees_any_object_the_middleware_published_on_the_request_scope(): void
     {
         $app = new AppScope();
         $app->instance(Config::class, new Config([]));
         $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register($controllerClass);
+        $mcpRegistry->register(RequestNoteReportingController::class);
         $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
         $app->boot();
 
         $router = new Router();
         $router->register(McpController::class);
-
-        return [$app, $router];
-    }
-
-    public function test_identity_via_interface_only_matches_between_ordinary_and_streamed_calls(): void
-    {
-        [$app, $router] = $this->dualIdentityAppAndRouter(IdentityViaInterfaceController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [PublishesDualIdentityMiddleware::class]]);
+        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [PublishesRequestNoteMiddleware::class]]);
 
         $ordinary = $this->toolResult($kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_interface'],
+            'params' => ['name' => 'read_request_note'],
         ])));
 
         $streamed = $this->toolResult($kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 2,
             'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_interface', '_meta' => ['progressToken' => 'tok']],
+            'params' => ['name' => 'read_request_note', '_meta' => ['progressToken' => 'tok']],
         ])));
 
-        self::assertSame(['caller' => 'agent-9'], $ordinary);
-        self::assertSame($ordinary, $streamed, 'identity via CurrentUserInterface must be identical, streamed or not');
+        self::assertSame(['note' => 'published by middleware'], $ordinary);
+        self::assertSame($ordinary, $streamed, 'a streamed call resolves from the request scope its middleware wrote to');
     }
 
     /**
-     * The concrete-class-only case — the one that was broken before this
-     * fix: an ordinary call already resolved ConcreteCurrentUser
-     * correctly (it never went through stream()'s own snapshot/replay at
-     * all), but a streamed call previously either failed to autowire it
-     * or silently constructed a disconnected instance, since only
-     * CurrentUserInterface was ever carried across.
-     */
-    public function test_identity_via_concrete_class_only_matches_between_ordinary_and_streamed_calls(): void
-    {
-        [$app, $router] = $this->dualIdentityAppAndRouter(IdentityViaConcreteController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [PublishesDualIdentityMiddleware::class]]);
-
-        $ordinary = $this->toolResult($kernel->handle($this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_concrete'],
-        ])));
-
-        $streamed = $this->toolResult($kernel->handle($this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 2,
-            'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_concrete', '_meta' => ['progressToken' => 'tok']],
-        ])));
-
-        self::assertSame(['caller' => 'agent-9', 'role' => 'admin'], $ordinary);
-        self::assertSame($ordinary, $streamed, 'identity via the concrete class must be identical, streamed or not');
-    }
-
-    /**
-     * Both bindings simultaneously — proving they resolve to the exact
-     * same object instance, not merely that each independently resolves
-     * to *something* that looks right.
-     */
-    public function test_identity_via_both_bindings_resolves_to_the_same_instance_for_ordinary_and_streamed_calls(): void
-    {
-        [$app, $router] = $this->dualIdentityAppAndRouter(IdentityViaBothController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [PublishesDualIdentityMiddleware::class]]);
-
-        $ordinary = $this->toolResult($kernel->handle($this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_both'],
-        ])));
-
-        $streamed = $this->toolResult($kernel->handle($this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 2,
-            'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_both', '_meta' => ['progressToken' => 'tok']],
-        ])));
-
-        self::assertSame(['sameInstance' => true, 'caller' => 'agent-9'], $ordinary);
-        self::assertSame($ordinary, $streamed, 'both bindings must still resolve to the same instance when streamed');
-    }
-
-    /**
-     * The negative case: with no authentication at all, a streamed call
-     * must not manufacture a phantom concrete-class identity out of
-     * nothing — both bindings stay absent, exactly as they do for the
-     * ordinary call.
-     */
-    public function test_an_unauthenticated_streamed_call_does_not_manufacture_a_concrete_class_identity(): void
-    {
-        [$app, $router] = $this->dualIdentityAppAndRouter(IdentityViaBothController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
-
-        $ordinary = $this->toolResult($kernel->handle($this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_both'],
-        ])));
-
-        $streamed = $this->toolResult($kernel->handle($this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 2,
-            'method' => 'tools/call',
-            'params' => ['name' => 'identity_via_both', '_meta' => ['progressToken' => 'tok']],
-        ])));
-
-        self::assertSame(['sameInstance' => false, 'caller' => 'anonymous'], $ordinary);
-        self::assertSame($ordinary, $streamed, 'no identity must be manufactured on the streamed path either');
-    }
-
-    /**
-     * The tool call itself succeeds and returns a real result — but the
-     * streamed call's own scope's disposal then fails. That failure must
-     * never suppress the already-written final SSE event, and a later
-     * dispose callback must still run despite an earlier one throwing.
+     * The tool call itself succeeds and returns a real result — but
+     * disposing the request scope behind the stream then fails. That
+     * failure must never suppress the already-written final SSE event,
+     * and a later dispose callback must still run despite an earlier one
+     * throwing.
      */
     public function test_a_streamed_calls_disposal_failure_does_not_suppress_the_final_event(): void
     {
@@ -1428,24 +1361,22 @@ final class McpControllerTest extends TestCase
      * SafeLogger::log($app->get(LoggerInterface::class), ...) is not
      * actually safe on its own: PHP evaluates that get() call before
      * log() is ever entered, so a throwing LoggerInterface binding
-     * escapes uncaught right where disposeStreamScope()'s own resolution
+     * escapes uncaught right where the stream lease's own resolution
      * happens — suppressing the already-written final event and aborting
      * the stream. This proves it doesn't.
      *
-     * $succeeds: 3 is the exact number of LoggerInterface resolutions
-     * this real request path makes before disposeStreamScope()'s own —
-     * ExceptionHandlerMiddleware's construction, Kernel's own
-     * TransactionGuardHook call against the request's scope, and the
-     * emitter's own TransactionGuardHook call against the stream's own
-     * scope — confirmed empirically, not assumed; if this test starts
-     * failing because it never reaches the streamed event at all, that
-     * count is the first thing to re-check.
+     * $succeeds: 2 is the number of LoggerInterface resolutions this
+     * real request path makes before the lease's own —
+     * ExceptionHandlerMiddleware's construction, and Kernel's
+     * TransactionGuardHook call against the request's scope. If this
+     * test starts failing because it never reaches the streamed event at
+     * all, that count is the first thing to re-check.
      */
     public function test_a_streamed_calls_final_event_survives_even_when_the_logger_itself_cannot_be_resolved(): void
     {
         $app = new AppScope();
         $app->instance(Config::class, new Config([]));
-        $loggerFactory = new ThrowsAfterFirstResolutionLogger(succeeds: 3);
+        $loggerFactory = new ThrowsAfterFirstResolutionLogger(succeeds: 2);
         $app->bind(LoggerInterface::class, $loggerFactory(...), shared: false);
         $mcpRegistry = new McpRegistry();
         $mcpRegistry->register(DisposalFailingToolController::class);
@@ -1486,10 +1417,11 @@ final class McpControllerTest extends TestCase
      * `@ob_flush()` suppresses PHP warnings, not a real thrown exception,
      * so this reaches the exact code path a broken/closed output stream
      * would. Proves the real output failure propagates as the primary
-     * failure, the stream's own scope is still fully disposed (every
-     * dispose callback attempted, including a simultaneous disposal
-     * failure — contained and logged separately, not instead), and the
-     * one failed write attempt is never retried or duplicated.
+     * failure, the request scope behind the stream is still fully
+     * disposed (every dispose callback attempted, including a
+     * simultaneous disposal failure — contained and logged separately,
+     * not instead), and the one failed write attempt is never retried or
+     * duplicated.
      */
     public function test_an_output_failure_still_disposes_the_scope_and_runs_every_callback(): void
     {

@@ -11,9 +11,9 @@ use Kinetis\Http\CurrentUserInterface;
  * (role()) — the same shape kinetis/auth-jwt's own JwtUser has (a claim,
  * jti for revocation most commonly, only reachable by injecting the
  * concrete class directly rather than the interface). Deliberately
- * generic, not JWT-specific: proves the KINETIS-74 fix carries any
- * concrete-class alias forward, not one hardcoded to a particular auth
- * package.
+ * generic, not JWT-specific: the guard's rule is about the portable
+ * interface id, whatever concrete class a given auth package happens to
+ * publish alongside it.
  */
 final readonly class ConcreteCurrentUser implements CurrentUserInterface
 {
