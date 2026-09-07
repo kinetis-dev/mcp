@@ -260,12 +260,11 @@ final class McpRegistryTest extends TestCase
     }
 
     /**
-     * Schema values the stored JSON has to escape — a `#[Regex]`
-     * pattern of quotes and backslashes, `#[In]` choices carrying a
-     * quote, a backslash, a line break and non-ASCII characters — come
-     * back through the real cache round trip byte for byte, and a
-     * float-valued `#[GreaterThan]` bound comes back a float rather
-     * than an int.
+     * Schema values the stored JSON has to escape — `#[In]` choices
+     * carrying a quote, a backslash, a line break and non-ASCII
+     * characters — come back through the real cache round trip byte for
+     * byte, and a float-valued `#[GreaterThan]` bound comes back a float
+     * rather than an int.
      */
     public function test_schema_values_that_json_must_escape_survive_a_real_cache_round_trip(): void
     {
@@ -279,13 +278,28 @@ final class McpRegistryTest extends TestCase
             ->findTool('json_hostile_schema_values');
 
         self::assertNotNull($reloadedTool);
-        self::assertSame('/^"\d+\\\\"$/', $reloadedTool->inputSchema['properties']['pattern']['pattern']);
         self::assertSame(
             ['quote"', 'back\\slash', "line\nbreak", 'héllo ☃'],
             $reloadedTool->inputSchema['properties']['choice']['enum'],
         );
         self::assertSame(1.0, $reloadedTool->inputSchema['properties']['amount']['exclusiveMinimum']);
         self::assertEquals($tool->inputSchema, $reloadedTool->inputSchema);
+    }
+
+    public function test_a_regex_constrained_input_keeps_a_plain_string_schema_with_no_pattern_keyword(): void
+    {
+        $live = new McpRegistry();
+        $live->register(JsonHostileSchemaValuesToolController::class);
+
+        $tool = $live->findTool('json_hostile_schema_values');
+        self::assertNotNull($tool);
+        self::assertSame(['type' => 'string'], $tool->inputSchema['properties']['pattern']);
+
+        $reloadedTool = McpRegistry::fromArray(self::publishAndReloadArtifact($live))
+            ->findTool('json_hostile_schema_values');
+
+        self::assertNotNull($reloadedTool);
+        self::assertSame(['type' => 'string'], $reloadedTool->inputSchema['properties']['pattern']);
     }
 
     public function test_implements_the_frameworks_cacheable_discovery_interface(): void

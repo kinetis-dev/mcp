@@ -10,11 +10,10 @@ use Kinetis\Validation\Constraints\In;
 use Kinetis\Validation\Constraints\Regex;
 
 /**
- * Schema values that stress the JSON text the artifact stores: a
- * `#[Regex]` pattern built from quotes and backslashes, `#[In]` choices
- * carrying a quote, a backslash, a line break and non-ASCII characters,
- * and a float-valued `#[GreaterThan]` bound that has to come back a
- * float rather than an int.
+ * Schema values that stress the JSON text the artifact stores: `#[In]`
+ * choices carrying a quote, a backslash, a line break and non-ASCII
+ * characters, and a float-valued `#[GreaterThan]` bound that has to come
+ * back a float rather than an int.
  */
 final readonly class JsonHostileSchemaValuesToolController
 {
