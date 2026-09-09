@@ -6,6 +6,7 @@ namespace Kinetis\Mcp;
 
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Validation\Constraint;
+use Kinetis\Validation\Exception\JsonSchemaException;
 use Kinetis\Validation\Exception\ValidationException;
 use Kinetis\Validation\Hydrator;
 use Kinetis\Validation\InputSource;
@@ -24,10 +25,23 @@ use ReflectionNamedType;
  * typed parameter, which is always injected directly rather than looked up
  * in the arguments object.
  *
- * $bindingPlans/$hydrationPlans are optional, compiled-ahead-of-time
- * replacements for what derivePlan()/Hydrator::compilePlan() would otherwise
- * reflect fresh on every call — see Kinetis\Cache\Compiler. A tool/resource
- * or DTO absent from either map falls back to live reflection transparently.
+ * That arguments object is closed: every key the call carries must name a
+ * client-facing parameter of the method, and one that does not is a
+ * violation on its own path rather than a silently discarded key. The
+ * injected ProgressReporter parameter is never one of those names. Every
+ * argument failure a call has — unknown, missing, wrong-typed, or refused
+ * by a rule — is collected and reported together, so an agent correcting a
+ * call sees all of it at once. A resource has no client argument object,
+ * and an already-constructed DTO instance handed straight to a parameter
+ * has no member map to close.
+ *
+ * $bindingPlans/$hydrationPlans are an optional seam for supplying those
+ * plans ready-made instead of reflecting them fresh on every call; nothing
+ * fills them today, and a tool/resource or DTO absent from either map falls
+ * back to live reflection transparently. No method bound here may declare
+ * a composite type: derivePlan() refuses one in the same vocabulary a
+ * tool's schema generation refuses it at registration, so a plan can never
+ * bind as mixed what registration would not admit.
  *
  * A tool call's arguments arrive as one decoded JSON object, so every
  * value they carry is written in InputSource::Json — the same vocabulary
@@ -115,9 +129,15 @@ final class McpDispatcher
     }
 
     /**
-     * Pure reflection -> plan; no call-time arguments involved. Used both by
-     * the live per-call fallback above (when no compiled plan exists for
-     * this tool/resource) and by Kinetis\Cache\Compiler ahead of time.
+     * Pure reflection -> plan; no call-time arguments involved. Used by the
+     * live per-call fallback above, whenever no compiled plan exists for
+     * this tool/resource.
+     *
+     * A composite type — an intersection, or any union — is refused here in
+     * the same vocabulary McpRegistry's schema generation refuses it in: a
+     * tool argument is one flat value with one wire shape, and a plan
+     * binding it would otherwise treat it as mixed, so the two derivation
+     * paths would disagree about what the method may declare.
      *
      * A ProgressReporter-typed parameter is tagged rather than omitted: were
      * it absent from the plan entirely, resolving it would still need a
@@ -126,6 +146,7 @@ final class McpDispatcher
      * cost this exists to remove.
      *
      * @return list<McpBindingPlanParameter>
+     * @throws JsonSchemaException
      */
     public static function derivePlan(ReflectionMethod $method): array
     {
@@ -133,16 +154,21 @@ final class McpDispatcher
 
         foreach ($method->getParameters() as $parameter) {
             $type = $parameter->getType();
-            $isProgressReporter = $type instanceof ReflectionNamedType && $type->getName() === ProgressReporter::class;
+
+            if ($type !== null && !$type instanceof ReflectionNamedType) {
+                throw JsonSchemaException::compositeType($parameter->getName());
+            }
+
+            $isProgressReporter = $type !== null && $type->getName() === ProgressReporter::class;
             $hasDefault = $parameter->isDefaultValueAvailable();
 
             $plan[] = [
                 'name' => $parameter->getName(),
                 'isProgressReporter' => $isProgressReporter,
-                'dtoClass' => $type instanceof ReflectionNamedType && !$type->isBuiltin() && !$isProgressReporter
+                'dtoClass' => $type !== null && !$type->isBuiltin() && !$isProgressReporter
                     ? $type->getName()
                     : null,
-                'scalarType' => $type instanceof ReflectionNamedType && $type->isBuiltin() ? $type->getName() : null,
+                'scalarType' => $type !== null && $type->isBuiltin() ? $type->getName() : null,
                 'hasDefault' => $hasDefault,
                 'defaultValue' => $hasDefault ? $parameter->getDefaultValue() : null,
                 // An untyped parameter accepts anything, null included.
@@ -169,17 +195,29 @@ final class McpDispatcher
     private function resolveFromPlan(array $plan, array $arguments, ?ProgressReporter $progress): array
     {
         $resolved = [];
+        $violations = [];
+        $client = [];
 
         foreach ($plan as $param) {
             $name = $param['name'];
 
             if ($param['isProgressReporter']) {
+                // Injected by the server, so it is not a name the client
+                // may send — and never counted as one when the arguments
+                // object is closed below.
                 $resolved[$name] = $progress ?? new ProgressReporter(null);
                 continue;
             }
 
+            $client[$name] = true;
+
             if (array_key_exists($name, $arguments)) {
-                $resolved[$name] = $this->resolveValueFromPlan($arguments[$name], $param);
+                try {
+                    $resolved[$name] = $this->resolveValueFromPlan($arguments[$name], $param);
+                } catch (ValidationException $e) {
+                    $violations = [...$violations, ...$e->violations];
+                }
+
                 continue;
             }
 
@@ -194,7 +232,25 @@ final class McpDispatcher
             // absent #[Query] parameter report, in the same envelope the
             // tool's other argument failures use, so an agent can see
             // what to send next.
-            throw ValidationException::fromViolations([Hydrator::requiredViolation([$name])]);
+            $violations[] = Hydrator::requiredViolation([$name]);
+        }
+
+        // The arguments object is closed for the same reason a JSON DTO
+        // object is: the tool's published inputSchema says
+        // `additionalProperties: false`, and an argument the method has no
+        // parameter for is one the agent believes it is passing and the
+        // tool will never read. Reported in the call's own order, after
+        // the parameters' own failures, and in the same envelope — one
+        // response tells an agent everything it got wrong, rather than
+        // one mistake per round trip.
+        foreach (array_keys($arguments) as $name) {
+            if (!isset($client[$name])) {
+                $violations[] = Hydrator::unexpectedFieldViolation([$name]);
+            }
+        }
+
+        if ($violations !== []) {
+            throw ValidationException::fromViolations($violations);
         }
 
         return $resolved;

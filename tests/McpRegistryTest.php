@@ -16,6 +16,7 @@ use Kinetis\Cache\PluginCache;
 use Kinetis\Mcp\Exception\DuplicateDefinitionException;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
+use Kinetis\Mcp\Tests\Fixtures\UnionArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\BuiltinCoverageToolController;
 use Kinetis\Mcp\Tests\Fixtures\DuplicateResourceUriController;
 use Kinetis\Mcp\Tests\Fixtures\DuplicateToolNameController;
@@ -59,7 +60,14 @@ final class McpRegistryTest extends TestCase
 
         self::assertNotNull($tool);
         self::assertSame(
-            ['type' => 'object', 'properties' => ['userId' => ['type' => 'integer']], 'required' => ['userId']],
+            [
+                'type' => 'object',
+                'properties' => ['userId' => ['type' => 'integer']],
+                'required' => ['userId'],
+                // The arguments object is closed: McpDispatcher rejects
+                // every key that is not a client-facing parameter.
+                'additionalProperties' => false,
+            ],
             $tool->inputSchema,
         );
     }
@@ -173,7 +181,7 @@ final class McpRegistryTest extends TestCase
         $artifact = self::publishAndReloadArtifact($live);
 
         self::assertSame(
-            '{"type":"object","properties":{},"required":[]}',
+            '{"type":"object","properties":{},"required":[],"additionalProperties":false}',
             $artifact['tools'][0]['inputSchemaJson'],
         );
 
@@ -183,7 +191,7 @@ final class McpRegistryTest extends TestCase
         self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']);
         self::assertSame([], $reloadedTool->inputSchema['required']);
         self::assertSame(
-            '{"type":"object","properties":{},"required":[]}',
+            '{"type":"object","properties":{},"required":[],"additionalProperties":false}',
             json_encode($reloadedTool->inputSchema, JSON_THROW_ON_ERROR),
         );
     }
@@ -235,7 +243,8 @@ final class McpRegistryTest extends TestCase
         self::assertNotNull($tool);
 
         $document = '{"type":"object","properties":{"note":{},'
-            . '"nested":{"type":["object","null"],"properties":{},"required":[]}},"required":[]}';
+            . '"nested":{"type":["object","null"],"properties":{},"required":[],"additionalProperties":false}},'
+            . '"required":[],"additionalProperties":false}';
         self::assertSame($document, json_encode($tool->inputSchema, JSON_THROW_ON_ERROR));
 
         $artifact = self::publishAndReloadArtifact($live);
@@ -297,6 +306,39 @@ final class McpRegistryTest extends TestCase
 
         self::assertNotNull($reloadedTool);
         self::assertSame(['type' => 'string'], $reloadedTool->inputSchema['properties']['pattern']);
+    }
+
+    /**
+     * A tool method parameter may not declare a union — including the
+     * `T|Absent` presence union a DTO constructor field may — because a
+     * tool's arguments are one flat object with no DTO to own the
+     * distinction and no truthful schema to publish for it. Refused at
+     * registration, so the tool is never advertised.
+     */
+    public function test_a_union_typed_tool_argument_is_rejected_at_registration(): void
+    {
+        $registry = new McpRegistry();
+
+        $this->expectException(JsonSchemaException::class);
+        $this->expectExceptionMessage('union or intersection type');
+
+        $registry->register(UnionArgumentToolController::class);
+    }
+
+    /**
+     * Closure reaches every object the document describes, not only the
+     * top-level arguments one.
+     */
+    public function test_a_nested_dto_argument_schema_is_closed_too(): void
+    {
+        $registry = new McpRegistry();
+        $registry->register(AccountController::class);
+
+        $tool = $registry->findTool('create_user');
+
+        self::assertNotNull($tool);
+        self::assertFalse($tool->inputSchema['additionalProperties']);
+        self::assertFalse($tool->inputSchema['properties']['data']['additionalProperties']);
     }
 
     public function test_implements_the_frameworks_cacheable_discovery_interface(): void

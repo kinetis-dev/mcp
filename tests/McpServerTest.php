@@ -140,6 +140,36 @@ final class McpServerTest extends TestCase
     }
 
     /**
+     * An argument naming no parameter travels the same structured route
+     * an ordinary argument failure does — the same envelope, the same
+     * ordered violations — so an agent that misspelled an argument reads
+     * what to fix rather than a silently accepted no-op.
+     */
+    public function test_tools_call_with_an_unknown_argument_reports_structured_errors(): void
+    {
+        $response = $this->server()->handle([
+            'jsonrpc' => '2.0',
+            'id' => 5,
+            'method' => 'tools/call',
+            'params' => [
+                'name' => 'get_user_status',
+                'arguments' => new JsonObject(['userId' => 42, 'userID' => 42]),
+                '_meta' => $this->meta(),
+            ],
+        ]);
+
+        self::assertArrayNotHasKey('error', $response);
+        self::assertTrue($response['result']['isError']);
+
+        $errors = self::toolErrors($response);
+
+        self::assertCount(1, $errors);
+        self::assertSame(['userID'], $errors[0]['path']);
+        self::assertSame('unexpected_field', $errors[0]['code']);
+        self::assertSame('is not expected.', $errors[0]['message']);
+    }
+
+    /**
      * An argument the call omitted reaches the client as argument
      * feedback, not as the fixed "Tool execution failed." string a
      * genuine tool fault gets (see

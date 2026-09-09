@@ -13,7 +13,9 @@ use Kinetis\Mcp\Tests\Fixtures\ConstrainedArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableDtoArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
 use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
+use Kinetis\Mcp\Tests\Fixtures\UnionArgumentToolController;
 use Kinetis\Mcp\ToolDefinition;
+use Kinetis\Validation\Exception\JsonSchemaException;
 use Kinetis\Validation\Exception\ValidationException;
 use PHPUnit\Framework\TestCase;
 
@@ -385,6 +387,20 @@ final class McpDispatcherTest extends TestCase
         self::assertNull($progressPlan[0]['dtoClass']);
     }
 
+    /**
+     * Registration refuses this tool's schema, but a plan is derived
+     * from the method itself — so binding has to refuse the same
+     * declaration rather than treating an argument with no single wire
+     * shape as mixed.
+     */
+    public function test_derive_plan_rejects_a_composite_argument_type(): void
+    {
+        $this->expectException(JsonSchemaException::class);
+        $this->expectExceptionMessage('union or intersection type');
+
+        McpDispatcher::derivePlan(new \ReflectionMethod(UnionArgumentToolController::class, 'run'));
+    }
+
     public function test_a_hand_built_plan_resolves_arguments_identically_to_the_live_path(): void
     {
         $app = new AppScope();
@@ -424,5 +440,97 @@ final class McpDispatcherTest extends TestCase
         $result = $dispatcher->callTool($tool, ['userId' => 42]);
 
         self::assertSame(['userId' => 42, 'status' => 'active'], $result);
+    }
+
+    /**
+     * The arguments object is closed, exactly as the tool's own
+     * inputSchema says: a key naming no parameter is a misspelling or a
+     * leftover the tool will never read, so it fails rather than being
+     * silently discarded.
+     */
+    public function test_an_unknown_top_level_argument_is_rejected(): void
+    {
+        $tool = $this->registry()->findTool('get_user_status');
+        self::assertNotNull($tool);
+
+        try {
+            $this->dispatcher()->callTool($tool, ['userId' => 42, 'userID' => 42]);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertCount(1, $e->violations);
+            self::assertSame(['userID'], $e->violations[0]->path);
+            self::assertSame('unexpected_field', $e->violations[0]->code);
+            self::assertSame('is not expected.', $e->violations[0]->message);
+        }
+    }
+
+    /**
+     * One response tells an agent everything wrong with its call, rather
+     * than one mistake per round trip.
+     */
+    public function test_unknown_arguments_are_combined_with_missing_and_wrong_typed_ones(): void
+    {
+        $tool = $this->registry()->findTool('get_user_status');
+        self::assertNotNull($tool);
+
+        try {
+            $this->dispatcher()->callTool($tool, ['stray' => 1, 'other' => 2]);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertSame(
+                [['userId'], ['stray'], ['other']],
+                array_map(static fn ($violation) => $violation->path, $e->violations),
+            );
+            self::assertSame(
+                ['required', 'unexpected_field', 'unexpected_field'],
+                array_map(static fn ($violation) => $violation->code, $e->violations),
+            );
+        }
+    }
+
+    /**
+     * A DTO argument's own object is closed by the hydrator, one level
+     * in. Its path follows this dispatcher's existing convention for a
+     * DTO-typed argument — the DTO's own member name, unprefixed, the
+     * same as every other failure inside one (see
+     * test_a_defaultless_nullable_nested_field_rejects_omission()).
+     */
+    public function test_an_unknown_member_of_a_dto_argument_is_rejected(): void
+    {
+        $tool = $this->registry()->findTool('create_user');
+        self::assertNotNull($tool);
+
+        try {
+            $this->dispatcher()->callTool($tool, [
+                'data' => ['name' => 'Alon', 'email' => 'alon@example.com', 'nmae' => 'typo'],
+            ]);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertSame(['nmae'], $e->violations[0]->path);
+            self::assertSame('unexpected_field', $e->violations[0]->code);
+        }
+    }
+
+    /**
+     * ProgressReporter is injected by the server, so it is not a name a
+     * client may send — it is neither required of a call nor accepted
+     * from one.
+     */
+    public function test_the_progress_reporter_is_not_a_client_argument_name(): void
+    {
+        $registry = new McpRegistry();
+        $registry->register(ProgressReportingController::class);
+        $tool = $registry->findTool('count_to_three');
+        self::assertNotNull($tool);
+
+        self::assertSame(['done' => true], $this->dispatcher()->callTool($tool, []));
+
+        try {
+            $this->dispatcher()->callTool($tool, ['progress' => 'mine']);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertSame(['progress'], $e->violations[0]->path);
+            self::assertSame('unexpected_field', $e->violations[0]->code);
+        }
     }
 }
