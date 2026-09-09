@@ -21,14 +21,19 @@ use Kinetis\Mcp\Tests\Fixtures\BuiltinCoverageToolController;
 use Kinetis\Mcp\Tests\Fixtures\DuplicateResourceUriController;
 use Kinetis\Mcp\Tests\Fixtures\DuplicateToolNameController;
 use Kinetis\Mcp\Tests\Fixtures\EmptyCollectionsToolController;
+use Kinetis\Mcp\Tests\Fixtures\EnumArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\JsonHostileSchemaValuesToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
 use Kinetis\Mcp\Tests\Fixtures\IntraClassDuplicateResourceController;
 use Kinetis\Mcp\Tests\Fixtures\IntraClassDuplicateToolController;
 use Kinetis\Mcp\Tests\Fixtures\MixedNewAndConflictingToolController;
+use Kinetis\Mcp\Tests\Fixtures\Severity;
+use Kinetis\Mcp\Tests\Fixtures\TypedListRequest;
+use Kinetis\Mcp\Tests\Fixtures\TypedListToolController;
 use Kinetis\Mcp\Tests\Fixtures\UnsupportedParameterToolController;
 use Kinetis\Mcp\Tests\Fixtures\ZeroParameterToolController;
 use Kinetis\Validation\Exception\JsonSchemaException;
+use Kinetis\Validation\JsonSchema;
 use PHPUnit\Framework\TestCase;
 
 final class McpRegistryTest extends TestCase
@@ -323,6 +328,51 @@ final class McpRegistryTest extends TestCase
         $this->expectExceptionMessage('union or intersection type');
 
         $registry->register(UnionArgumentToolController::class);
+    }
+
+    /**
+     * A backed enum is a DTO field's shape, not a tool argument's:
+     * McpDispatcher binds a tool's own arguments through the shared
+     * method-parameter path, which has no enum branch, so a tool
+     * declaring one fails registration instead of publishing a schema
+     * no call could be dispatched against.
+     */
+    public function test_a_backed_enum_tool_argument_is_rejected_at_registration(): void
+    {
+        $registry = new McpRegistry();
+
+        $this->expectException(JsonSchemaException::class);
+        $this->expectExceptionMessage(Severity::class);
+
+        $registry->register(EnumArgumentToolController::class);
+    }
+
+    /**
+     * The same DTO field an OpenAPI document describes, described the
+     * same way here: both entry points read one classification, so an
+     * agent and an HTTP client are told the same thing about the same
+     * list.
+     */
+    public function test_a_typed_collection_dto_argument_publishes_its_item_schema(): void
+    {
+        $registry = new McpRegistry();
+        $registry->register(TypedListToolController::class);
+
+        $tool = $registry->findTool('typed_list');
+
+        self::assertNotNull($tool);
+        self::assertSame(
+            JsonSchema::forClass(TypedListRequest::class),
+            $tool->inputSchema['properties']['data'],
+        );
+        self::assertSame(
+            ['type' => 'array', 'items' => ['type' => 'string', 'minLength' => 2]],
+            $tool->inputSchema['properties']['data']['properties']['tags'],
+        );
+        self::assertSame(
+            ['type' => 'string', 'enum' => ['info', 'warning']],
+            $tool->inputSchema['properties']['data']['properties']['severity'],
+        );
     }
 
     /**
