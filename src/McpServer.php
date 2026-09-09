@@ -516,8 +516,24 @@ final class McpServer
                 'isError' => false,
             ];
         } catch (ValidationException $e) {
+            // This server's own tool-error envelope, carrying the
+            // failure's violations: the same ordered
+            // path/code/message/parameters objects the HTTP renderer
+            // puts in its problem document, not that document itself,
+            // which describes an HTTP response an MCP client never
+            // receives. Substituting invalid UTF-8 rather than
+            // throwing on it keeps an application constraint that
+            // quotes raw client bytes back from turning argument
+            // feedback into a transport-level failure carrying no
+            // feedback at all.
             return [
-                'content' => [['type' => 'text', 'text' => json_encode(['errors' => $e->errors], JSON_THROW_ON_ERROR)]],
+                'content' => [[
+                    'type' => 'text',
+                    'text' => json_encode(
+                        ['errors' => $e->violations],
+                        JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE,
+                    ),
+                ]],
                 'isError' => true,
             ];
         } catch (Throwable $e) {

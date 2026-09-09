@@ -178,7 +178,10 @@ final class McpDispatcher
      * Kinetis\Http\Dispatcher applies to #[Query]/path parameters and
      * Hydrator applies to #[Body] fields — an MCP tool argument's JSON
      * value is exactly as typed as a JSON request body, so there's no
-     * reason for a third, more permissive copy of this logic here.
+     * reason for a third, more permissive copy of this logic here. Its
+     * violations are Hydrator's own too, so a wrong-shaped argument
+     * carries the identical path, code and message it would carry over
+     * HTTP.
      *
      * @param array{name:string, isProgressReporter:bool, dtoClass:?string, scalarType:?string, hasDefault:bool, defaultValue:mixed} $param
      * @throws ValidationException
@@ -203,8 +206,8 @@ final class McpDispatcher
             }
 
             if (is_scalar($value)) {
-                throw ValidationException::forErrors([
-                    $param['name'] => ['must be an object, ' . self::describeType($value) . ' given.'],
+                throw ValidationException::fromViolations([
+                    Hydrator::objectExpectedViolation([$param['name']], $value),
                 ]);
             }
 
@@ -215,10 +218,10 @@ final class McpDispatcher
         $scalarType = $param['scalarType'];
 
         if ($scalarType !== null) {
-            $message = Hydrator::typeMismatchMessage($scalarType, $value);
+            $violation = Hydrator::typeMismatchViolation([$param['name']], $scalarType, $value);
 
-            if ($message !== null) {
-                throw ValidationException::forErrors([$param['name'] => [$message]]);
+            if ($violation !== null) {
+                throw ValidationException::fromViolations([$violation]);
             }
         }
 
@@ -230,18 +233,6 @@ final class McpDispatcher
         // resolveParameterValue()'s identical reasoning for the #[Body]
         // case this mirrors.
         return $this->castScalar(JsonTree::unwrap($value), $scalarType);
-    }
-
-    private static function describeType(mixed $value): string
-    {
-        return match (true) {
-            is_array($value) => 'array',
-            is_bool($value) => 'boolean',
-            is_float($value) => 'float',
-            is_int($value) => 'integer',
-            is_object($value) => 'object',
-            default => 'value',
-        };
     }
 
     private function castScalar(mixed $value, ?string $scalarType): mixed

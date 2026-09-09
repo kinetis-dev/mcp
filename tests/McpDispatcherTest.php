@@ -74,7 +74,7 @@ final class McpDispatcherTest extends TestCase
             $this->dispatcher()->callTool($tool, ['userId' => 'not-a-number']);
             self::fail('Expected a ValidationException.');
         } catch (ValidationException $e) {
-            self::assertArrayHasKey('userId', $e->errors);
+            self::assertArrayHasKey('userId', $e->grouped());
         }
     }
 
@@ -87,7 +87,7 @@ final class McpDispatcherTest extends TestCase
             $this->dispatcher()->callTool($tool, ['data' => 'not-an-object']);
             self::fail('Expected a ValidationException.');
         } catch (ValidationException $e) {
-            self::assertArrayHasKey('data', $e->errors);
+            self::assertArrayHasKey('data', $e->grouped());
         }
     }
 
@@ -114,11 +114,11 @@ final class McpDispatcherTest extends TestCase
         } catch (ValidationException $e) {
             // Not "data.requiredNullable": callTool()'s own 'data' param is
             // the top-level DTO itself here, hydrated directly via
-            // Hydrator::hydrate() — the dotted "parent.nested" key only
-            // appears when a DTO is nested *inside* another one
-            // (resolveNestedDtoValue()), which this fixture's own single
-            // top-level DTO argument never is.
-            self::assertSame(['is required.'], $e->errors['requiredNullable']);
+            // Hydrator::hydrate() — a parent segment is prefixed onto a
+            // violation's path only when a DTO is nested *inside*
+            // another one, which this fixture's own single top-level DTO
+            // argument never is.
+            self::assertSame(['is required.'], $e->grouped()['requiredNullable']);
         }
     }
 
