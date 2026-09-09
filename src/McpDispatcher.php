@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Kinetis\Mcp;
 
 use Kinetis\Instrumentation\Telemetry;
-use Kinetis\Mcp\Exception\UnresolvableParameterException;
 use Kinetis\Validation\Constraint;
 use Kinetis\Validation\Exception\ValidationException;
 use Kinetis\Validation\Hydrator;
@@ -189,7 +188,13 @@ final class McpDispatcher
                 continue;
             }
 
-            throw UnresolvableParameterException::forParameter($name);
+            // An argument the call had to carry and did not is invalid
+            // client input, not a server fault: it reports as the same
+            // `required` violation an absent #[Body] DTO member and an
+            // absent #[Query] parameter report, in the same envelope the
+            // tool's other argument failures use, so an agent can see
+            // what to send next.
+            throw ValidationException::fromViolations([Hydrator::requiredViolation([$name])]);
         }
 
         return $resolved;
@@ -205,12 +210,43 @@ final class McpDispatcher
      * #[GreaterThan]/#[In] a tool's inputSchema publishes is a rule the
      * call is actually checked against.
      *
+     * A DTO-typed argument takes the branch below, which answers the
+     * same questions in the same order for an object-shaped value: null
+     * first, then the shape. Every answer either binds a value or is a
+     * violation; nothing this method returns can fail the controller's
+     * own signature.
+     *
      * @param McpBindingPlanParameter $param
      * @throws ValidationException
      */
     private function resolveValueFromPlan(mixed $value, array $param): mixed
     {
         if ($param['dtoClass'] !== null) {
+            /** @var class-string $dtoClass */
+            $dtoClass = $param['dtoClass'];
+
+            // Null is decided before any shape is examined, exactly as
+            // Hydrator does for a #[Body] DTO field: a nullable
+            // parameter takes null as its value, and a non-nullable one
+            // reports the same `null_not_allowed` violation rather than
+            // handing the controller a null its signature refuses and
+            // letting a raw TypeError stand in for the answer.
+            if ($value === null) {
+                if ($param['allowsNull']) {
+                    return null;
+                }
+
+                throw ValidationException::fromViolations([
+                    Hydrator::nullNotAllowedViolation([$param['name']]),
+                ]);
+            }
+
+            // An already-constructed instance is taken as given, the
+            // same value a class-typed #[Body] field accepts.
+            if ($value instanceof $dtoClass) {
+                return $value;
+            }
+
             // A DTO-typed tool argument's own real value — a genuine JSON
             // object — arrives marked as a JsonObject once McpServer's own
             // JsonTree::convert() step is in the picture (see its own
@@ -221,20 +257,18 @@ final class McpDispatcher
             }
 
             if (is_array($value)) {
-                /** @var class-string $dtoClass */
-                $dtoClass = $param['dtoClass'];
-
                 return Hydrator::hydrate($dtoClass, $value, $this->hydrationPlans[$dtoClass] ?? null, InputSource::Json);
             }
 
-            if (is_scalar($value)) {
-                throw ValidationException::fromViolations([
-                    Hydrator::objectExpectedViolation([$param['name']], $value),
-                ]);
-            }
-
-            // null, or already an object — pass through unchanged.
-            return $value;
+            // Anything else is a value this parameter cannot be given:
+            // an object of some other class no JSON document could have
+            // carried, or a scalar where the tool's inputSchema declares
+            // an object.
+            throw ValidationException::fromViolations([
+                is_object($value)
+                    ? Hydrator::notAnInstanceViolation([$param['name']], $dtoClass)
+                    : Hydrator::objectExpectedViolation([$param['name']], $value),
+            ]);
         }
 
         [$resolved, $violations] = Hydrator::resolveScalar(

@@ -228,8 +228,8 @@ final class McpRegistry implements CacheableDiscoveryInterface
      * JsonSchema spells `{}` as a live `stdClass` — forParameters()'s
      * `properties` for a class or tool with no parameters, and
      * schemaForScalar()'s whole schema for a `mixed`-typed argument —
-     * while `required` and an `#[In([])]` enum are ordinary empty PHP
-     * arrays that have to stay arrays. A compiled artifact carries
+     * while `required` is an ordinary empty PHP array that has to stay
+     * an array. A compiled artifact carries
      * plain data only: CacheStore::assertExportable() refuses an object
      * anywhere in a section before it is written, so a live stdClass
      * never reaches disk. The artifact therefore carries the schema as
@@ -409,11 +409,11 @@ final class McpRegistry implements CacheableDiscoveryInterface
      *
      * Decoding in object mode is what makes the representation
      * unambiguous: `{}` arrives as an empty `stdClass` and `[]` as an
-     * empty array, so an empty `required` list, an `#[In([])]` enum's
-     * own empty choices, and an empty schema object are three distinct
-     * values before anything here looks at them, at any depth and in
-     * any combination. Nothing is inferred from a value, and there is
-     * no second field for the JSON text to disagree with.
+     * empty array, so an empty `required` list and an empty schema
+     * object are two distinct values before anything here looks at
+     * them, at any depth and in any combination. Nothing is inferred
+     * from a value, and there is no second field for the JSON text to
+     * disagree with.
      *
      * normalizeDecodedNode() then restores the shape the live
      * JsonSchema path builds — a JSON object's members as a keyed PHP

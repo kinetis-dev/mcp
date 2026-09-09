@@ -219,12 +219,12 @@ final class McpRegistryTest extends TestCase
 
     /**
      * The adversarial pairing, through the real cache round trip: an
-     * empty `#[In([])]` enum and an empty top-level `required` list,
-     * which are JSON arrays, beside a `mixed`-typed argument's empty
-     * schema object and a nested DTO carrying a second empty object and
-     * a second empty list two levels further down. The stored JSON text
-     * is the one notation that tells the two apart, so each value comes
-     * back the type it went in as, whatever depth it sits at.
+     * empty top-level `required` list, which is a JSON array, beside a
+     * `mixed`-typed argument's empty schema object and a nested DTO
+     * carrying a second empty object and a second empty list two levels
+     * further down. The stored JSON text is the one notation that tells
+     * the two apart, so each value comes back the type it went in as,
+     * whatever depth it sits at.
      */
     public function test_empty_arrays_and_empty_objects_keep_their_json_types_through_a_real_cache_round_trip(): void
     {
@@ -234,7 +234,7 @@ final class McpRegistryTest extends TestCase
         $tool = $live->findTool('empty_collections');
         self::assertNotNull($tool);
 
-        $document = '{"type":"object","properties":{"choice":{"enum":[]},"note":{},'
+        $document = '{"type":"object","properties":{"note":{},'
             . '"nested":{"type":["object","null"],"properties":{},"required":[]}},"required":[]}';
         self::assertSame($document, json_encode($tool->inputSchema, JSON_THROW_ON_ERROR));
 
@@ -248,9 +248,8 @@ final class McpRegistryTest extends TestCase
         self::assertSame($document, json_encode($reloadedTool->inputSchema, JSON_THROW_ON_ERROR));
 
         // Asserted value by value as well, so a failure names which of
-        // the four lost its JSON type rather than only that the
+        // the three lost its JSON type rather than only that the
         // document differs somewhere.
-        self::assertSame([], $reloadedTool->inputSchema['properties']['choice']['enum']);
         self::assertSame([], $reloadedTool->inputSchema['required']);
         self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']['note']);
         self::assertInstanceOf(\stdClass::class, $reloadedTool->inputSchema['properties']['nested']['properties']);

@@ -10,6 +10,7 @@ use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\ProgressReporter;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\ConstrainedArgumentToolController;
+use Kinetis\Mcp\Tests\Fixtures\NullableDtoArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
 use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
 use Kinetis\Mcp\ToolDefinition;
@@ -291,6 +292,71 @@ final class McpDispatcherTest extends TestCase
         } catch (ValidationException $e) {
             self::assertSame(['userId'], $e->violations[0]->path);
             self::assertSame('null_not_allowed', $e->violations[0]->code);
+        }
+    }
+
+    /**
+     * An argument the call had to carry and did not is invalid client
+     * input, reported in the same structured vocabulary every other
+     * argument failure uses — the same `required` violation an absent
+     * #[Body] member and an absent #[Query] parameter produce — rather
+     * than as a server-side failure the client cannot act on.
+     */
+    public function test_an_absent_defaultless_argument_is_a_required_violation(): void
+    {
+        $tool = $this->registry()->findTool('get_user_status');
+        self::assertNotNull($tool);
+
+        try {
+            $this->dispatcher()->callTool($tool, []);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertCount(1, $e->violations);
+            self::assertSame(['userId'], $e->violations[0]->path);
+            self::assertSame('required', $e->violations[0]->code);
+            self::assertSame('is required.', $e->violations[0]->message);
+        }
+    }
+
+    /**
+     * Null is decided by the declared type, before any shape is
+     * examined: a DTO-typed argument that accepts null takes it as its
+     * value, and no hydration is attempted for a value there is nothing
+     * to hydrate.
+     */
+    public function test_a_nullable_dto_typed_argument_accepts_an_explicit_null(): void
+    {
+        $registry = new McpRegistry();
+        $registry->register(NullableDtoArgumentToolController::class);
+        $tool = $registry->findTool('update_user');
+        self::assertNotNull($tool);
+
+        self::assertSame(['name' => null], $this->dispatcher()->callTool($tool, ['data' => null]));
+        self::assertSame(
+            ['name' => 'Alon'],
+            $this->dispatcher()->callTool($tool, ['data' => ['name' => 'Alon', 'email' => 'alon@example.com']]),
+        );
+    }
+
+    /**
+     * The other half of that decision: a DTO-typed argument whose
+     * declared type refuses null reports the same `null_not_allowed`
+     * violation a scalar argument and a #[Body] field report, never
+     * passing the null through to the controller as a TypeError.
+     */
+    public function test_an_explicit_null_for_a_non_nullable_dto_argument_is_a_validation_error(): void
+    {
+        $tool = $this->registry()->findTool('create_user');
+        self::assertNotNull($tool);
+
+        try {
+            $this->dispatcher()->callTool($tool, ['data' => null]);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertCount(1, $e->violations);
+            self::assertSame(['data'], $e->violations[0]->path);
+            self::assertSame('null_not_allowed', $e->violations[0]->code);
+            self::assertSame('must not be null.', $e->violations[0]->message);
         }
     }
 

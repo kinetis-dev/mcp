@@ -11,6 +11,7 @@ use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\McpServer;
 use Kinetis\Mcp\Tests\Fixtures\InMemoryLogger;
+use Kinetis\Mcp\Tests\Fixtures\NullableDtoArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\BuiltinCoverageToolController;
 use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
@@ -136,6 +137,83 @@ final class McpServerTest extends TestCase
         self::assertSame('min_length', $errors[0]['code']);
         self::assertSame('must be at least 3 characters.', $errors[0]['message']);
         self::assertSame(['length' => 3], $errors[0]['parameters']);
+    }
+
+    /**
+     * An argument the call omitted reaches the client as argument
+     * feedback, not as the fixed "Tool execution failed." string a
+     * genuine tool fault gets (see
+     * test_a_throwing_tool_reports_a_generic_failure_and_logs_the_real_exception()):
+     * toolErrors() decoding at all is the discrimination, since that
+     * content is not JSON, and the violation it finds names the
+     * argument to send.
+     */
+    public function test_tools_call_with_an_absent_required_argument_reports_structured_errors(): void
+    {
+        $response = $this->server()->handle([
+            'jsonrpc' => '2.0',
+            'id' => 5,
+            'method' => 'tools/call',
+            'params' => ['name' => 'get_user_status', 'arguments' => new JsonObject([]), '_meta' => $this->meta()],
+        ]);
+
+        self::assertArrayNotHasKey('error', $response);
+        self::assertTrue($response['result']['isError']);
+
+        $errors = self::toolErrors($response);
+
+        self::assertCount(1, $errors);
+        self::assertSame(['userId'], $errors[0]['path']);
+        self::assertSame('required', $errors[0]['code']);
+        self::assertSame('is required.', $errors[0]['message']);
+    }
+
+    /**
+     * An explicit null for a DTO-typed argument: a violation when the
+     * parameter refuses null, and the argument's own value when it
+     * accepts one — the same two answers over the transport that
+     * McpDispatcher reaches directly.
+     */
+    public function test_tools_call_reports_a_null_dto_argument_by_what_the_parameter_declares(): void
+    {
+        $refused = $this->server()->handle([
+            'jsonrpc' => '2.0',
+            'id' => 5,
+            'method' => 'tools/call',
+            'params' => [
+                'name' => 'create_user',
+                'arguments' => new JsonObject(['data' => null]),
+                '_meta' => $this->meta(),
+            ],
+        ]);
+
+        self::assertArrayNotHasKey('error', $refused);
+        self::assertTrue($refused['result']['isError']);
+
+        $errors = self::toolErrors($refused);
+
+        self::assertSame([['data']], array_column($errors, 'path'));
+        self::assertSame('null_not_allowed', $errors[0]['code']);
+
+        $registry = new McpRegistry();
+        $registry->register(NullableDtoArgumentToolController::class);
+
+        $app = new AppScope();
+        $app->boot();
+
+        $accepted = new McpServer($registry, new McpDispatcher($app))->handle([
+            'jsonrpc' => '2.0',
+            'id' => 6,
+            'method' => 'tools/call',
+            'params' => [
+                'name' => 'update_user',
+                'arguments' => new JsonObject(['data' => null]),
+                '_meta' => $this->meta(),
+            ],
+        ]);
+
+        self::assertFalse($accepted['result']['isError']);
+        self::assertSame(['name' => null], json_decode($accepted['result']['content'][0]['text'], true));
     }
 
     public function test_tools_call_with_an_unknown_tool_name_is_an_rpc_error(): void
