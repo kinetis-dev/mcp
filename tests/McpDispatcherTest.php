@@ -9,6 +9,7 @@ use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\ProgressReporter;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
+use Kinetis\Mcp\Tests\Fixtures\ConstrainedArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
 use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
 use Kinetis\Mcp\ToolDefinition;
@@ -38,9 +39,31 @@ final class McpDispatcherTest extends TestCase
         $tool = $this->registry()->findTool('get_user_status');
         self::assertNotNull($tool);
 
-        $result = $this->dispatcher()->callTool($tool, ['userId' => '42']);
+        $result = $this->dispatcher()->callTool($tool, ['userId' => 42]);
 
         self::assertSame(['userId' => 42, 'status' => 'active'], $result);
+    }
+
+    /**
+     * A tool call's arguments are a decoded JSON object, and the tool's
+     * own published inputSchema says `{"type": "integer"}` for this one,
+     * so the numeric string an untyped source might send is a violation
+     * rather than a value quietly cast behind the schema's back.
+     */
+    public function test_a_numeric_string_does_not_satisfy_an_integer_argument(): void
+    {
+        $tool = $this->registry()->findTool('get_user_status');
+        self::assertNotNull($tool);
+
+        try {
+            $this->dispatcher()->callTool($tool, ['userId' => '42']);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertCount(1, $e->violations);
+            self::assertSame(['userId'], $e->violations[0]->path);
+            self::assertSame('type_mismatch', $e->violations[0]->code);
+            self::assertSame('integer', $e->violations[0]->parameters['expected']);
+        }
     }
 
     public function test_calls_a_tool_with_a_dto_argument_and_validates_it(): void
@@ -219,6 +242,58 @@ final class McpDispatcherTest extends TestCase
         self::assertSame(['done' => true], $result);
     }
 
+    /**
+     * A constraint attribute on a scalar tool argument is a rule the
+     * tool's own inputSchema already publishes (`exclusiveMinimum`,
+     * `enum`), so the call is checked against it — the same rule, the
+     * same violation, as the identical attribute on an HTTP #[Query]
+     * parameter.
+     */
+    public function test_a_constraint_on_a_scalar_argument_is_enforced(): void
+    {
+        $registry = new McpRegistry();
+        $registry->register(ConstrainedArgumentToolController::class);
+        $tool = $registry->findTool('list_page');
+        self::assertNotNull($tool);
+
+        self::assertSame(
+            ['page' => 2, 'direction' => 'desc'],
+            $this->dispatcher()->callTool($tool, ['page' => 2, 'direction' => 'desc']),
+        );
+
+        // Each argument is resolved and reported on its own, the way
+        // this dispatcher has always reported a wrong-shaped one.
+        foreach ([['page' => 0], ['direction' => 'sideways']] as $index => $override) {
+            try {
+                $this->dispatcher()->callTool($tool, [...['page' => 2, 'direction' => 'asc'], ...$override]);
+                self::fail('Expected a ValidationException.');
+            } catch (ValidationException $e) {
+                self::assertCount(1, $e->violations);
+                self::assertSame([array_key_first($override)], $e->violations[0]->path);
+                self::assertSame(['greater_than', 'in'][$index], $e->violations[0]->code);
+            }
+        }
+    }
+
+    /**
+     * An explicitly-null argument for a parameter whose declared type
+     * refuses null is a violation carrying the same code a #[Body] field
+     * gets, never a raw TypeError at invocation.
+     */
+    public function test_an_explicit_null_for_a_non_nullable_argument_is_a_validation_error(): void
+    {
+        $tool = $this->registry()->findTool('get_user_status');
+        self::assertNotNull($tool);
+
+        try {
+            $this->dispatcher()->callTool($tool, ['userId' => null]);
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertSame(['userId'], $e->violations[0]->path);
+            self::assertSame('null_not_allowed', $e->violations[0]->code);
+        }
+    }
+
     public function test_derive_plan_tags_a_scalar_a_dto_and_a_progress_reporter_parameter_correctly(): void
     {
         $tool = $this->registry()->findTool('create_user');
@@ -256,13 +331,15 @@ final class McpDispatcherTest extends TestCase
             'scalarType' => 'int',
             'hasDefault' => false,
             'defaultValue' => null,
+            'allowsNull' => false,
+            'constraints' => [],
         ]];
 
         $dispatcher = new McpDispatcher($app, ['Kinetis\Mcp\Tests\Fixtures\AccountController::getUserStatus' => $plan]);
         $tool = $this->registry()->findTool('get_user_status');
         self::assertNotNull($tool);
 
-        $result = $dispatcher->callTool($tool, ['userId' => '42']);
+        $result = $dispatcher->callTool($tool, ['userId' => 42]);
 
         self::assertSame(['userId' => 42, 'status' => 'active'], $result);
     }
@@ -278,7 +355,7 @@ final class McpDispatcherTest extends TestCase
         $tool = $this->registry()->findTool('get_user_status');
         self::assertNotNull($tool);
 
-        $result = $dispatcher->callTool($tool, ['userId' => '42']);
+        $result = $dispatcher->callTool($tool, ['userId' => 42]);
 
         self::assertSame(['userId' => 42, 'status' => 'active'], $result);
     }

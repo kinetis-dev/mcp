@@ -17,7 +17,6 @@ use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingLogger;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingResourceController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingToolController;
-use Kinetis\Validation\Constraints\MinLength;
 use PHPUnit\Framework\TestCase;
 
 final class McpServerTest extends TestCase
@@ -134,9 +133,9 @@ final class McpServerTest extends TestCase
         $errors = self::toolErrors($response);
 
         self::assertSame([['name'], ['email']], array_column($errors, 'path'));
-        self::assertSame('constraint', $errors[0]['code']);
+        self::assertSame('min_length', $errors[0]['code']);
         self::assertSame('must be at least 3 characters.', $errors[0]['message']);
-        self::assertSame(['constraint' => MinLength::class], $errors[0]['parameters']);
+        self::assertSame(['length' => 3], $errors[0]['parameters']);
     }
 
     public function test_tools_call_with_an_unknown_tool_name_is_an_rpc_error(): void
@@ -884,8 +883,8 @@ final class McpServerTest extends TestCase
 
     // The MCP error envelope/content contract for a wrong-shaped
     // builtin-typed argument, pinned through a real JSON-RPC tools/call.
-    // Hydrator::typeMismatchViolation() is the exact same check an HTTP
-    // #[Query]/path parameter or #[Body] field gets; this proves McpServer
+    // Hydrator::resolveScalar() is the exact same path an HTTP
+    // #[Query]/path parameter or #[Body] field takes; this proves McpServer
     // carries its ValidationException through to the same isError:true +
     // {errors: [...]} shape every DTO-argument validation failure already
     // gets (see test_tools_call_with_invalid_dto_arguments_reports_is_error_not_an_rpc_error
