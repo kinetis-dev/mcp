@@ -1366,18 +1366,17 @@ final class McpControllerTest extends TestCase
      * happens — suppressing the already-written final event and aborting
      * the stream. This proves it doesn't.
      *
-     * $succeeds: 2 is the number of LoggerInterface resolutions this
+     * $succeeds: 1 is the number of LoggerInterface resolutions this
      * real request path makes before the lease's own —
-     * ExceptionHandlerMiddleware's construction, and Kernel's
-     * TransactionGuardHook call against the request's scope. If this
-     * test starts failing because it never reaches the streamed event at
-     * all, that count is the first thing to re-check.
+     * ExceptionHandlerMiddleware's construction. If this test starts
+     * failing because it never reaches the streamed event at all, that
+     * count is the first thing to re-check.
      */
     public function test_a_streamed_calls_final_event_survives_even_when_the_logger_itself_cannot_be_resolved(): void
     {
         $app = new AppScope();
         $app->instance(Config::class, new Config([]));
-        $loggerFactory = new ThrowsAfterFirstResolutionLogger(succeeds: 2);
+        $loggerFactory = new ThrowsAfterFirstResolutionLogger(succeeds: 1);
         $app->bind(LoggerInterface::class, $loggerFactory(...), shared: false);
         $mcpRegistry = new McpRegistry();
         $mcpRegistry->register(DisposalFailingToolController::class);

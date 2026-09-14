@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "e11b2fe83f67c41c16a340e35e3841ea",
+    "content-hash": "6f0667471d642d09e60a25a185e5ba57",
     "packages": [
         {
             "name": "graham-campbell/result-type",
@@ -3157,64 +3157,6 @@
                 }
             ],
             "description": "Bearer/opaque-token authentication middleware for Kinetis, built entirely on interfaces core already requires (PSR-7/PSR-15). See kinetis/auth-jwt for stateless JWT verification instead.",
-            "transport-options": {
-                "relative": true
-            }
-        },
-        {
-            "name": "kinetis/persistence",
-            "version": "dev-main",
-            "dist": {
-                "type": "path",
-                "url": "../persistence",
-                "reference": "39f4af7be651d5df70eaa010c3abfcae795750d9"
-            },
-            "require": {
-                "kinetis/framework": "dev-main",
-                "php": "^8.4",
-                "revolt/event-loop": "^1.0.9"
-            },
-            "require-dev": {
-                "infection/infection": "^0.35.0",
-                "kinetis/mcp": "dev-main",
-                "kinetis/queue": "dev-main",
-                "nyholm/psr7": "^1.8.2",
-                "phpstan/phpstan": "^2.2.8",
-                "phpunit/phpunit": "^13.3.3",
-                "vimeo/psalm": "^6.17"
-            },
-            "suggest": {
-                "ext-mysqli": "Needed by the native MySQL driver (Kinetis\\Persistence\\Driver\\MysqliAsyncClient) — the default under FrankenPHP worker mode via DB_DRIVER=auto.",
-                "ext-pdo_mysql": "Needed by the PDO MySQL driver (Kinetis\\Persistence\\Driver\\PdoMysqlClient) — the default under PHP-FPM via DB_DRIVER=auto.",
-                "ext-pdo_pgsql": "Needed by the PDO Postgres driver (Kinetis\\Persistence\\Driver\\PdoPgsqlClient) — the default under PHP-FPM via DB_DRIVER=auto.",
-                "ext-pgsql": "Needed by the native Postgres driver (Kinetis\\Persistence\\Driver\\PgsqlAsyncClient) — the default under FrankenPHP worker mode via DB_DRIVER=auto.",
-                "ext-sockets": "Needed alongside ext-pgsql by the native Postgres driver (Kinetis\\Persistence\\Driver\\PgsqlAsyncClient), which ends a connection's transport with socket_shutdown() to abandon a statement without blocking the event loop."
-            },
-            "type": "library",
-            "extra": {
-                "kinetis": {
-                    "bootstrap": "Kinetis\\Persistence\\PackageBootstrap"
-                }
-            },
-            "autoload": {
-                "psr-4": {
-                    "Kinetis\\Persistence\\": "src/"
-                }
-            },
-            "autoload-dev": {
-                "psr-4": {
-                    "Kinetis\\Persistence\\Tests\\": "tests/"
-                }
-            },
-            "license": [
-                "MIT"
-            ],
-            "authors": [
-                {
-                    "name": "Alon Noy"
-                }
-            ],
-            "description": "Request-scoped SQL transaction safety net, runtime-matched native DB drivers (mysqli async, ext-pgsql async, PDO), and the connection factory for Kinetis — MySQL and Postgres.",
             "transport-options": {
                 "relative": true
             }
@@ -7409,8 +7351,7 @@
     "minimum-stability": "stable",
     "stability-flags": {
         "kinetis/auth": 20,
-        "kinetis/framework": 20,
-        "kinetis/persistence": 20
+        "kinetis/framework": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

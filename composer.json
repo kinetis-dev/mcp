@@ -20,7 +20,6 @@
     "require-dev": {
         "infection/infection": "^0.35.0",
         "kinetis/auth": "dev-main",
-        "kinetis/persistence": "dev-main",
         "phpstan/phpstan": "^2.2.8",
         "phpunit/phpunit": "^13.3.3",
         "vimeo/psalm": "^6.17"
@@ -46,10 +45,6 @@
         {
             "type": "path",
             "url": "../auth"
-        },
-        {
-            "type": "path",
-            "url": "../persistence"
         },
         {
             "type": "path",

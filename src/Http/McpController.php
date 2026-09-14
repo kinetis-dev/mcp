@@ -19,10 +19,10 @@ use Psr\Http\Message\ServerRequestInterface;
  * MCP's Streamable HTTP transport as an ordinary route, which is what
  * gives every message the full request lifecycle with nothing special
  * to wire: dispatchCore() creates the scope this controller resolves
- * from, TransactionGuard rolls back what a tool leaves open, and the
- * `mcp` middleware group — resolved from the same scope, like any route
- * middleware — can authenticate and publish CurrentUserInterface where
- * the tool actually sees it.
+ * from, with every AppScope::onRequestScopeCreated() initializer already
+ * run on it, and the `mcp` middleware group — resolved from the same
+ * scope, like any route middleware — can authenticate and publish
+ * CurrentUserInterface where the tool actually sees it.
  *
  * Only POST is declared. GET and DELETE answer the router's own 405
  * carrying `Allow: POST`, which is exactly what the 2026-07-28

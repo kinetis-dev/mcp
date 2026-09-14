@@ -553,11 +553,9 @@ final class StdioTransportTest extends TestCase
      * log() is ever entered, so a throwing LoggerInterface binding
      * escapes uncaught right where disposeScope()'s own resolution
      * happens — suppressing the already-written response and crashing
-     * the loop. This proves it doesn't: the fixture logger's first
-     * resolution (TransactionGuardHook::registerIfAvailable(), via
-     * kinetis/persistence's TransactionGuard) succeeds, and the later
-     * resolution disposeScope() makes throws instead — the response must
-     * still be written and the loop must still continue.
+     * the loop. This proves it doesn't: the resolution disposeScope()
+     * makes is the fixture logger's first, and it throws — the response
+     * must still be written and the loop must still continue.
      */
     public function test_the_response_survives_even_when_the_logger_itself_cannot_be_resolved(): void
     {
@@ -565,7 +563,7 @@ final class StdioTransportTest extends TestCase
         $registry->register(DisposalFailingToolController::class);
 
         $app = new AppScope();
-        $loggerFactory = new ThrowsAfterFirstResolutionLogger();
+        $loggerFactory = new ThrowsAfterFirstResolutionLogger(succeeds: 0);
         $app->bind(LoggerInterface::class, $loggerFactory(...), shared: false);
         $app->boot();
 

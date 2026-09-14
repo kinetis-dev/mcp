@@ -6,7 +6,6 @@ namespace Kinetis\Mcp\Transport;
 
 use Kinetis\Container\AppScope;
 use Kinetis\Container\RequestScope;
-use Kinetis\Container\TransactionGuardHook;
 use Kinetis\Logging\SafeLogger;
 use Kinetis\Mcp\Exception\StdioWriteException;
 use Kinetis\Mcp\JsonRpcCodec;
@@ -108,12 +107,9 @@ final class StdioTransport
             // json_encode()d and caught internally before being embedded
             // as text (McpServer::callTool()/handle()), so $response is
             // always both the real, already-computed outcome and already
-            // safe to encode again here. TransactionGuardHook::
-            // registerIfAvailable() and the write itself (writeFrame(),
-            // or a closed/broken stdout) can still genuinely fail — a
-            // broken container binding resolving one of TransactionGuard's
-            // own dependencies, a broken output stream — and either
-            // failure propagates as the real primary failure here.
+            // safe to encode again here. The write itself (writeFrame(),
+            // or a closed/broken stdout) can still fail, and
+            // that failure propagates as the real primary failure here.
             // $writeFailure (a progress-notification write that failed
             // mid-call, stashed rather than thrown — see $onNotification
             // above) is re-thrown here, before the final response is
@@ -124,15 +120,11 @@ final class StdioTransport
             // what makes it safe to run in this finally regardless of
             // what inside the try block failed — a `finally` block is
             // only dangerous when the block itself can throw. Every call
-            // that can genuinely fail is inside this try, not just the
+            // that can fail is inside this try, not just the
             // final write, so a scope that was actually created always
-            // gets disposed even when registering its own dispose hook,
-            // or an earlier progress write, is what fails.
+            // gets disposed even when an earlier progress write is what
+            // fails.
             try {
-                if ($scope !== null) {
-                    TransactionGuardHook::registerIfAvailable($scope);
-                }
-
                 $response = array_key_exists('message', $decoded)
                     ? $server->handle($decoded['message'], $onNotification, $scope)
                     : $decoded['errorResponse'];
