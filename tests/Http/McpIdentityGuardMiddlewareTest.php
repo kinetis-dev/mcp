@@ -17,13 +17,15 @@ use Kinetis\Mcp\Http\McpIdentityGuardMiddleware;
 use Kinetis\Mcp\Http\McpOriginMiddleware;
 use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
-use Kinetis\Mcp\McpServer;
+use Kinetis\Mcp\KinetisMcpApplication;
 use Kinetis\Mcp\Tests\Fixtures\GroupOrderProject\ApplicationAuthMiddleware;
 use Kinetis\Mcp\Tests\Fixtures\GuardedInvocationController;
 use Kinetis\Mcp\Tests\Fixtures\PublishesConcreteUserOnlyMiddleware;
 use Kinetis\Mcp\Tests\Fixtures\PublishesUserMiddleware;
 use Kinetis\Mcp\Tests\Fixtures\UnreachableRequestHandler;
-use Kinetis\Mcp\Transport\StdioTransport;
+use Kinetis\McpProtocol\McpServer;
+use Kinetis\McpProtocol\ServerInfo;
+use Kinetis\McpProtocol\StdioLoop;
 use Nyholm\Psr7\ServerRequest;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\ResponseInterface;
@@ -41,38 +43,15 @@ final class McpIdentityGuardMiddlewareTest extends TestCase
     }
 
     /**
-     * The `_meta` every request needs — required by the 2026-07-28
-     * protocol, the only revision this server implements.
-     *
-     * @return array<string, mixed>
-     */
-    private function meta(): array
-    {
-        return [
-            'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
-            'io.modelcontextprotocol/clientCapabilities' => (object) [],
-        ];
-    }
-
-    /**
-     * A POST /mcp request whose mirrored headers match its own body, the
-     * shape McpController::headerMismatch() requires of every request.
+     * A POST /mcp request carrying the protocol-version header every
+     * non-initialize message needs.
      *
      * @param array<string, mixed> $body
      */
     private function mcpRequest(array $body): ServerRequest
     {
-        $params = is_array($body['params'] ?? null) ? $body['params'] : [];
-        $params['_meta'] = [...$this->meta(), ...(is_array($params['_meta'] ?? null) ? $params['_meta'] : [])];
-        $body['params'] = $params;
-
-        $request = (new ServerRequest('POST', '/mcp', body: json_encode($body)))
-            ->withHeader('MCP-Protocol-Version', '2026-07-28')
-            ->withHeader('Mcp-Method', (string) ($body['method'] ?? null));
-
-        $name = $params['name'] ?? $params['uri'] ?? null;
-
-        return $name !== null ? $request->withHeader('Mcp-Name', (string) $name) : $request;
+        return new ServerRequest('POST', '/mcp', body: json_encode($body))
+            ->withHeader('MCP-Protocol-Version', McpServer::PROTOCOL_VERSION);
     }
 
     private function toolCall(): ServerRequest
@@ -122,7 +101,10 @@ final class McpIdentityGuardMiddlewareTest extends TestCase
         $app->instance(Config::class, new Config($config));
         $registry = new McpRegistry();
         $registry->register(GuardedInvocationController::class);
-        $app->instance(McpServer::class, new McpServer($registry, new McpDispatcher($app)));
+        $app->instance(McpServer::class, new McpServer(
+            new ServerInfo('Kinetis', '1.0.0'),
+            new KinetisMcpApplication($registry, new McpDispatcher($app)),
+        ));
         $app->boot();
 
         $router = new Router();
@@ -384,19 +366,22 @@ final class McpIdentityGuardMiddlewareTest extends TestCase
         [$app] = $this->appAndRouter();
         $registry = new McpRegistry();
         $registry->register(GuardedInvocationController::class);
-        $server = new McpServer($registry, new McpDispatcher($app));
+        $server = new McpServer(
+            new ServerInfo('Kinetis', '1.0.0'),
+            new KinetisMcpApplication($registry, new McpDispatcher($app)),
+        );
 
         $input = fopen('php://memory', 'r+');
         fwrite($input, json_encode([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'tools/call',
-            'params' => ['name' => 'guarded_tool', 'arguments' => (object) [], '_meta' => $this->meta()],
+            'params' => ['name' => 'guarded_tool', 'arguments' => (object) []],
         ]) . "\n");
         rewind($input);
         $output = fopen('php://memory', 'r+');
 
-        new StdioTransport()->run($server, $input, $output);
+        new StdioLoop()->run($server, $input, $output);
 
         rewind($output);
         /** @var array<string, mixed> $response */

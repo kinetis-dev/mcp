@@ -9,9 +9,9 @@ use RuntimeException;
 
 /**
  * The exception message deliberately looks like internal detail (a fake
- * SQL error) — exactly the kind of text McpServer::callTool()'s generic
- * catch must keep out of the content it hands back to the connected
- * agent.
+ * SQL error) — exactly the kind of text KinetisMcpApplication::callTool()'s
+ * generic catch must keep out of the content it hands back to the
+ * connected agent.
  */
 final readonly class ThrowingToolController
 {

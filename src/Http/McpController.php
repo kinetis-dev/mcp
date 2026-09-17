@@ -8,31 +8,33 @@ use Kinetis\Container\RequestScope;
 use Kinetis\Http\Attributes\Middleware;
 use Kinetis\Http\Attributes\Post;
 use Kinetis\Http\StreamedResponse;
-use Kinetis\Mcp\Exception\JsonRpcException;
-use Kinetis\Mcp\JsonRpcCodec;
-use Kinetis\Mcp\McpServer;
+use Kinetis\McpProtocol\Exception\JsonRpcException;
+use Kinetis\McpProtocol\JsonRpcCodec;
+use Kinetis\McpProtocol\McpServer;
 use Nyholm\Psr7\Response;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 
 /**
  * MCP's Streamable HTTP transport as an ordinary route, which is what
- * gives every message the full request lifecycle with nothing special
- * to wire: dispatchCore() creates the scope this controller resolves
- * from, with every AppScope::onRequestScopeCreated() initializer already
- * run on it, and the `mcp` middleware group — resolved from the same
- * scope, like any route middleware — can authenticate and publish
- * CurrentUserInterface where the tool actually sees it.
+ * gives every message the full request lifecycle with nothing special to
+ * wire: dispatchCore() creates the scope this controller resolves from,
+ * with every AppScope::onRequestScopeCreated() initializer already run on
+ * it, and the `mcp` middleware group — resolved from the same scope, like
+ * any route middleware — can authenticate and publish
+ * CurrentUserInterface where the tool actually sees it. That scope is
+ * passed straight to the server as the message's context; this controller
+ * creates none of its own and disposes none.
  *
  * Only POST is declared. GET and DELETE answer the router's own 405
- * carrying `Allow: POST`, which is exactly what the 2026-07-28
- * transport spec asks a server implementing only this revision to
- * return for either method — earlier revisions used GET for a
- * server-initiated stream and DELETE for session termination, and
- * Kinetis implements neither.
+ * carrying `Allow: POST`: GET opens a server-initiated stream and DELETE
+ * terminates a session, and this server implements neither. Sessions are
+ * optional in this revision, so no `Mcp-Session-Id` is ever issued and
+ * none is ever required.
  *
- * Headers mirrored from the body (MCP-Protocol-Version, Mcp-Method,
- * Mcp-Name) are enforced on every request.
+ * `MCP-Protocol-Version` is the only protocol header, and the only state
+ * anything here reads about which revision is in play — nothing is
+ * remembered between requests to infer it from.
  */
 #[Middleware('@mcp')]
 final readonly class McpController
@@ -47,122 +49,130 @@ final readonly class McpController
     {
         // The body reaching here is already bounded and complete:
         // RequestBodyMiddleware settles the byte ceiling and stages the
-        // whole body before any handler runs, so an oversized request
-        // is a 413 that never arrives at this method. Cast rather than
-        // getContents(): the staged stream is seekable and replayable,
-        // and the cast is the representation that rewinds first, so a
+        // whole body before any handler runs, so an oversized request is a
+        // 413 that never arrives at this method. Cast rather than
+        // getContents(): the staged stream is seekable and replayable, and
+        // the cast is the representation that rewinds first, so a
         // middleware that already inspected the body leaves the whole
         // envelope readable here rather than an empty remainder.
-        //
-        // JsonRpcCodec::decode() is the same shared decode/structural-
-        // validation path StdioTransport uses, run here *before* the
-        // mirrored-header check below — a malformed envelope must get
-        // the same JSON-RPC code/id semantics regardless of transport,
-        // never a header-mismatch response for a body that was never a
-        // valid request to begin with.
         $decoded = JsonRpcCodec::decode((string) $request->getBody());
 
         if (\array_key_exists('errorResponse', $decoded)) {
-            return $this->json($decoded['errorResponse'], $this->httpStatus($decoded['errorResponse']));
+            // Transport-level malformed input: the envelope carries the
+            // JSON-RPC reason and the status says the request itself was
+            // never usable.
+            return $this->json($decoded['errorResponse'], 400);
+        }
+
+        if (\array_key_exists('ignored', $decoded)) {
+            return new Response(202);
         }
 
         $message = $decoded['message'];
+        $versionError = $this->protocolVersionError($request, $message);
 
-        // The full nested preflight — not just the envelope decode()
-        // already checked — run here too, before the header check and
-        // stream selection below: a malformed _meta/clientCapabilities/
-        // arguments/name/uri/progressToken must never surface as a
-        // header mismatch (headerMismatch() reads the same fields to
-        // build its own comparison) or open the SSE stream
-        // wantsProgressStream() would otherwise start, since either
-        // would commit this request to an outcome other than the
-        // -32602/-32600 McpServer::handle() would give it once
-        // dispatched anyway. Same validator handle() itself runs
-        // unconditionally as its own first step — reused, not
-        // duplicated. A notification (no `id`) whose envelope is valid
-        // but whose content preflight() rejects gets neither dispatched
-        // nor answered — PreflightResult::suppress() — which is exactly
-        // why this stops here too, before header/stream decisions that
-        // a suppressed notification must never reach either.
-        $preflight = $this->mcp->preflight($message);
-
-        if (!$preflight->shouldDispatch) {
-            return $preflight->response === null
-                ? new Response(202)
-                : $this->json($preflight->response, $this->httpStatus($preflight->response));
-        }
-
-        $mismatch = $this->headerMismatch($request, $message);
-
-        if ($mismatch !== null) {
-            return $this->json(
-                JsonRpcCodec::errorEnvelope($message['id'] ?? null, JsonRpcException::headerMismatch($mismatch)),
-                400,
-            );
+        if ($versionError !== null) {
+            return $versionError;
         }
 
         if ($this->wantsProgressStream($message)) {
             return $this->stream($message);
         }
 
-        // The request's own scope — created, hooked, and disposed by
-        // dispatchCore() like any other route's.
-        $response = $this->mcp->handle($message, scope: $this->scope);
+        $response = $this->mcp->handle($message, null, $this->scope);
 
-        // Spec: a POST body containing only notifications/responses gets
-        // 202 Accepted with no body once the server has accepted it. Not
-        // reachable in practice — the 2026-07-28 revision defines no
-        // client-to-server notifications over Streamable HTTP — but
-        // harmless to keep. $message having already passed structural
-        // validation above is what makes this safe: a null $response
-        // here always means a genuine notification, never a malformed
-        // request silently swallowed.
+        // A valid notification is accepted and answered with no body, per
+        // the transport spec. $message has already passed structural
+        // validation, so a null response here is always a genuine
+        // notification, never a malformed request silently swallowed.
         if ($response === null) {
             return new Response(202);
         }
 
-        return $this->json($response, $this->httpStatus($response));
+        // A protocol error after a valid envelope is an ordinary JSON-RPC
+        // response: the request was understood, and its outcome belongs in
+        // the envelope rather than in a status code a client would have to
+        // map back.
+        return $this->json($response, 200);
     }
 
     /**
-     * `progressToken` is a spec-general reserved `_meta` key — see
-     * McpServer::callTool(). By the time this runs, preflight() has
-     * already confirmed a *present* progressToken is string/int-typed —
-     * the check here is only which requests want a stream at all, not a
-     * second validation pass. `$decoded['params']` may still be the raw,
-     * not-yet-flattened value JsonRpcCodec::decode() hands back (a
-     * `stdClass`, when one was given), so this reads it through
-     * JsonRpcCodec's object accessors rather than a plain array index.
+     * The one protocol-version rule this transport enforces.
      *
-     * Streaming is request-only: `array_key_exists('id', $decoded)` is
-     * checked first, not just method/progressToken, so a fully valid
-     * `tools/call` *notification* — no `id` member at all — never opens
-     * the SSE stream just because it happens to carry a well-formed
-     * progressToken. That case still dispatches normally (the tool
-     * genuinely runs, matching JSON-RPC's own "a server MUST process a
-     * notification" rule) and gets the ordinary null-response → `202`
-     * path serve() already has, exactly like any other notification —
-     * `id: null` (the value, present as a key) is JSON-RPC's own distinct
-     * "a request whose id happens to be null," never a notification, so
-     * `array_key_exists()` is deliberately used here rather than a
-     * `?? null` truthiness check that would conflate the two.
+     * `initialize` is what establishes the version, so it may arrive
+     * without the header. Every later message must carry it, and must
+     * carry exactly this server's revision. A missing header on a later
+     * message means the spec's 2025-03-26 fallback, which this
+     * single-version server does not implement, so it is refused rather
+     * than assumed: nothing is remembered from an earlier request that
+     * could stand in for it.
      *
-     * @param array<string, mixed> $decoded
+     * @param array<string, mixed> $message
      */
-    private function wantsProgressStream(array $decoded): bool
+    private function protocolVersionError(ServerRequestInterface $request, array $message): ?ResponseInterface
     {
-        if (!\array_key_exists('id', $decoded)) {
+        $header = $request->getHeaderLine('MCP-Protocol-Version');
+
+        if ($header === '') {
+            if (($message['method'] ?? null) === 'initialize') {
+                return null;
+            }
+
+            return $this->versionRefusal($message, 'The "MCP-Protocol-Version" header is required.');
+        }
+
+        if ($header === McpServer::PROTOCOL_VERSION) {
+            return null;
+        }
+
+        return $this->versionRefusal(
+            $message,
+            'Unsupported "MCP-Protocol-Version": this server implements ' . McpServer::PROTOCOL_VERSION . ' only.',
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $message
+     */
+    private function versionRefusal(array $message, string $reason): ResponseInterface
+    {
+        return $this->json(
+            JsonRpcCodec::errorEnvelope($message['id'] ?? null, JsonRpcException::invalidRequest($reason)),
+            400,
+        );
+    }
+
+    /**
+     * Which requests want an SSE stream at all.
+     *
+     * Streaming is request-only: a fully valid `tools/call` *notification*
+     * carrying a well-formed progress token never opens a stream, because
+     * there is no response to end it with. `array_key_exists()` rather
+     * than a `?? null` check, since `id: null` is a request whose id is
+     * null — an invalid one this revision rejects — and never a
+     * notification.
+     *
+     * A malformed token is deliberately not streamed either: the server
+     * rejects it with -32602, and that belongs in an ordinary JSON
+     * response rather than inside a stream opened for a request that was
+     * never going to produce progress.
+     *
+     * `$message['params']` may still be the raw, not-yet-flattened value
+     * JsonRpcCodec::decode() hands back, so this reads it through the
+     * codec's object accessors rather than a plain array index.
+     *
+     * @param array<string, mixed> $message
+     */
+    private function wantsProgressStream(array $message): bool
+    {
+        if (!\array_key_exists('id', $message) || ($message['method'] ?? null) !== 'tools/call') {
             return false;
         }
 
-        if (($decoded['method'] ?? null) !== 'tools/call') {
-            return false;
-        }
+        $meta = JsonRpcCodec::objectGet($message['params'] ?? null, '_meta');
+        $token = JsonRpcCodec::objectGet($meta, 'progressToken');
 
-        $params = $decoded['params'] ?? [];
-        $meta = JsonRpcCodec::objectGet($params, '_meta') ?? [];
-
-        return JsonRpcCodec::objectHas($meta, 'progressToken');
+        return JsonRpcCodec::objectHas($meta, 'progressToken') && (\is_string($token) || \is_int($token));
     }
 
     /**
@@ -172,19 +182,18 @@ final readonly class McpController
      * before the body starts streaming, so any JSON-RPC error surfaces
      * inside the final event's payload instead.
      *
-     * The emitter dispatches on the very scope injected here, which
-     * Kernel keeps alive until the stream is emitted or abandoned and
-     * disposes exactly once through its own lease. So a streamed call
-     * resolves from the same container an ordinary one does: whatever an
-     * `mcp`-group middleware published — an identity under any number of
-     * ids, or anything else request-scoped — is simply already there,
-     * and the rollback hook Kernel registered covers the tool the same
-     * way. Nothing about the scope's lifetime is this package's to
-     * decide; see {@see \Kinetis\Http\StreamScopeLease}.
+     * The emitter dispatches on the very scope injected here, which Kernel
+     * keeps alive until the stream is emitted or abandoned and disposes
+     * exactly once through its own lease. So a streamed call resolves from
+     * the same container an ordinary one does: whatever an `mcp`-group
+     * middleware published is simply already there, and the rollback hook
+     * Kernel registered covers the tool the same way. Nothing about the
+     * scope's lifetime is this package's to decide; see
+     * {@see \Kinetis\Http\StreamScopeLease}.
      *
-     * @param array<string, mixed> $decoded
+     * @param array<string, mixed> $message
      */
-    private function stream(array $decoded): ResponseInterface
+    private function stream(array $message): ResponseInterface
     {
         $inner = new Response(200, [
             'Content-Type' => 'text/event-stream',
@@ -194,7 +203,7 @@ final readonly class McpController
         $mcp = $this->mcp;
         $scope = $this->scope;
 
-        $emitter = static function () use ($mcp, $decoded, $scope): void {
+        $emitter = static function () use ($mcp, $message, $scope): void {
             $write = static function (array $payload): void {
                 echo 'data: ' . \json_encode($payload, JSON_THROW_ON_ERROR) . "\n\n";
 
@@ -205,28 +214,15 @@ final readonly class McpController
                 \flush();
             };
 
-            $onNotification = static function (array $notification) use ($write): void {
-                $write([
-                    'jsonrpc' => '2.0',
-                    'method' => 'notifications/progress',
-                    'params' => $notification,
-                ]);
-            };
-
-            // $mcp->handle() never throws — the same top-level
-            // containment as the stdio transport, and every JSON-RPC
-            // response it builds is itself already json_encode()d and
-            // caught internally before being embedded as text
-            // (McpServer::callTool()/handle()) — so $response is always
-            // both the real, already-computed outcome and already safe
-            // to encode again here. write()'s own output step can still
-            // genuinely fail: an ob_start() output-buffer handler
-            // installed further up the call stack throwing when write()'s
-            // own @ob_flush() invokes it (`@` suppresses PHP warnings,
-            // not a real thrown exception, so it reaches the caller
-            // unchanged). That failure is the primary one, and the lease
-            // wrapping this emitter still disposes the scope around it.
-            $response = $mcp->handle($decoded, $onNotification, $scope);
+            // $mcp->handle() never throws — the same top-level containment
+            // the stdio loop relies on — so $response is always the real,
+            // already-computed outcome. write()'s own output step can
+            // still fail: an ob_start() handler installed further up the
+            // stack throwing when @ob_flush() invokes it (`@` suppresses
+            // PHP warnings, not a thrown exception). That failure is the
+            // primary one, and the lease wrapping this emitter still
+            // disposes the scope around it.
+            $response = $mcp->handle($message, $write, $scope);
 
             if ($response !== null) {
                 $write($response);
@@ -234,116 +230,6 @@ final readonly class McpController
         };
 
         return new StreamedResponse($inner, $emitter);
-    }
-
-    /**
-     * Streamable HTTP mirrors selected JSON-RPC body fields into headers
-     * so intermediaries can route and inspect requests without parsing
-     * the body. Deliberately does NOT mirror `x-mcp-header`
-     * tool-parameter headers — optional for servers per the spec.
-     *
-     * @param array<string, mixed> $decoded
-     * @return string|null a human-readable mismatch description, or null if the headers are valid
-     */
-    private function headerMismatch(ServerRequestInterface $request, array $decoded): ?string
-    {
-        $expectedVersion = McpServer::requestedProtocolVersion($decoded);
-        $headerVersion = $request->getHeaderLine('MCP-Protocol-Version');
-
-        if ($headerVersion === '' || $headerVersion !== $expectedVersion) {
-            return "Header mismatch: MCP-Protocol-Version header value \"{$headerVersion}\" does not match body value \"{$expectedVersion}\".";
-        }
-
-        $method = $decoded['method'] ?? null;
-        $headerMethod = $request->getHeaderLine('Mcp-Method');
-
-        if ($headerMethod === '' || $headerMethod !== $method) {
-            $bodyMethod = \is_string($method) ? $method : 'null';
-
-            return "Header mismatch: Mcp-Method header value \"{$headerMethod}\" does not match body value \"{$bodyMethod}\".";
-        }
-
-        return $this->nameHeaderMismatch($request, $decoded, $method);
-    }
-
-    /**
-     * `Mcp-Name` mirrors `params.name` (`tools/call`) or `params.uri`
-     * (`resources/read`) — the spec's third method needing it,
-     * `prompts/get`, has no equivalent here, since this server never
-     * implements prompts. Required only for these two methods.
-     * `$decoded['params']` may still be the raw, not-yet-flattened value
-     * decode() hands back, so this reads it through JsonRpcCodec's object
-     * accessors rather than a plain array index.
-     *
-     * @param array<string, mixed> $decoded
-     */
-    private function nameHeaderMismatch(ServerRequestInterface $request, array $decoded, mixed $method): ?string
-    {
-        $params = $decoded['params'] ?? [];
-
-        $bodyName = match ($method) {
-            'tools/call' => JsonRpcCodec::objectGet($params, 'name'),
-            'resources/read' => JsonRpcCodec::objectGet($params, 'uri'),
-            default => null,
-        };
-
-        if (!\is_string($bodyName)) {
-            // Absent, or a non-string value preflight() would already
-            // have rejected with -32602 before this ever runs — either
-            // way, nothing here to validate the header against, and
-            // never cast a malformed value for comparison or error text
-            // (an array/object would emit a PHP warning on the (string)
-            // cast this used to do, escalating to an ErrorException
-            // under an application's own warning-to-exception handler).
-            return null;
-        }
-
-        $headerName = $request->getHeaderLine('Mcp-Name');
-        $decodedHeaderName = self::decodeHeaderValue($headerName);
-
-        if ($headerName === '' || $decodedHeaderName === null || $decodedHeaderName !== $bodyName) {
-            return "Header mismatch: Mcp-Name header value \"{$headerName}\" does not match body value \"{$bodyName}\".";
-        }
-
-        return null;
-    }
-
-    /**
-     * Decodes a header value per the transport's Base64 sentinel format
-     * (`=?base64?{...}?=`), used by a conforming client when a value
-     * can't be safely represented as plain ASCII. A value not wrapped in
-     * the sentinel is returned as-is; one that is but fails to decode
-     * returns null, so the caller's comparison fails closed rather than
-     * treating a malformed header as a match.
-     */
-    private static function decodeHeaderValue(string $value): ?string
-    {
-        if (!\str_starts_with($value, '=?base64?') || !\str_ends_with($value, '?=')) {
-            return $value;
-        }
-
-        $decoded = \base64_decode(\substr($value, 9, -2), strict: true);
-
-        return $decoded === false ? null : $decoded;
-    }
-
-    /**
-     * Maps a JSON-RPC error response to the HTTP status the 2026-07-28
-     * transport spec mandates for that error code. Only the codes the
-     * spec documents a status for are mapped; anything else keeps the
-     * transport-level default of 200 — the envelope carries the outcome.
-     *
-     * @param array<string, mixed> $response
-     */
-    private function httpStatus(array $response): int
-    {
-        $code = $response['error']['code'] ?? null;
-
-        return match ($code) {
-            -32020, -32021, -32022, -32600, -32602 => 400,
-            -32601 => 404,
-            default => 200,
-        };
     }
 
     private function json(mixed $data, int $status): ResponseInterface

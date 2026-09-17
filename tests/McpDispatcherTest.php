@@ -8,6 +8,7 @@ use Kinetis\Container\AppScope;
 use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\ProgressReporter;
+use Kinetis\McpProtocol\ProgressEmitter;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\ConstrainedArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableDtoArgumentToolController;
@@ -220,12 +221,12 @@ final class McpDispatcherTest extends TestCase
         self::assertNotNull($tool);
 
         $captured = [];
-        $progress = new ProgressReporter(
-            static function (array $payload) use (&$captured): void {
-                $captured[] = $payload;
+        $progress = new ProgressReporter(new ProgressEmitter(
+            static function (array $notification) use (&$captured): void {
+                $captured[] = $notification;
             },
             'tok',
-        );
+        ));
 
         $result = $this->dispatcher()->callTool($tool, [], $progress);
 

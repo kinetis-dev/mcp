@@ -4,41 +4,30 @@ declare(strict_types=1);
 
 namespace Kinetis\Mcp;
 
-use Closure;
+use Kinetis\McpProtocol\ProgressEmitter;
 
 /**
- * Injected into a tool method (by type — see McpDispatcher::resolveArguments())
- * so it can report progress on a long-running call without knowing anything
- * about the transport carrying that progress out. report() just invokes a
- * closure synchronously, inline, on the same call stack as the tool method
- * itself — there's no coroutine/suspension involved, since nothing here
- * needs to pause the tool method, only to let it emit a message at a point
- * in its own execution.
+ * Injected into a tool method by type — see McpDispatcher::derivePlan() —
+ * so it can report progress on a long-running call without knowing
+ * anything about the transport carrying that progress out.
  *
- * $emit is null whenever the calling request didn't include a
- * `_meta.progressToken` (per spec, progress notifications only make sense
- * tied to a token the client is prepared to receive them for) — report()
- * silently no-ops in that case, so tool code can always call it
- * unconditionally without checking whether it's in a streaming context.
+ * This is the Kinetis-facing name: a tool method declares a parameter of
+ * this type, and the protocol package's own emitter stays behind it, so an
+ * application controller imports nothing from the wire layer. report()
+ * invokes the emitter synchronously, inline, on the tool method's own call
+ * stack — nothing here pauses the tool, only lets it emit a message part
+ * way through its own execution.
+ *
+ * The emitter is absent whenever the call carried no `_meta.progressToken`
+ * or the transport cannot carry a notification, so report() silently does
+ * nothing and tool code can always call it unconditionally.
  */
-final class ProgressReporter
+final readonly class ProgressReporter
 {
-    public function __construct(
-        private readonly ?Closure $emit,
-        private readonly int|string|null $progressToken = null,
-    ) {}
+    public function __construct(private ?ProgressEmitter $emitter = null) {}
 
     public function report(int|float $progress, int|float|null $total = null, ?string $message = null): void
     {
-        if ($this->emit === null) {
-            return;
-        }
-
-        ($this->emit)([
-            'progressToken' => $this->progressToken,
-            'progress' => $progress,
-            'total' => $total,
-            'message' => $message,
-        ]);
+        $this->emitter?->report($progress, $total, $message);
     }
 }

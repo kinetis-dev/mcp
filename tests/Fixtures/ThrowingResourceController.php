@@ -8,15 +8,14 @@ use Kinetis\Mcp\Attributes\McpResource;
 use RuntimeException;
 
 /**
- * Unlike a tool, McpServer::readResource() has no inner try/catch of its
- * own wrapping a resource method's execution into isError:true content —
- * only tools get that convention. A resource method throwing propagates
- * all the way to McpServer::handle()'s outer catch, the -32603 Internal
- * error path this fixture exists to exercise.
+ * A read has no isError result of its own — that convention belongs to
+ * tools — so a resource method throwing becomes the -32603 Internal error
+ * KinetisMcpApplication::readResource() raises, which is the path this
+ * fixture exists to exercise.
  *
  * The message deliberately looks like internal detail (a fake SQL error
- * plus a file path) — exactly the kind of text handle()'s generic catch
- * must keep out of the client-facing envelope, matching the discipline
+ * plus a file path): exactly the kind of text the generic envelope must
+ * keep away from a client, matching the discipline
  * ThrowingToolController's own message already establishes for the
  * tools/call path.
  */

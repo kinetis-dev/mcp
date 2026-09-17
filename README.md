@@ -40,11 +40,14 @@ final readonly class AccountController
 }
 ```
 
-Two transports: stdio (`kinetis mcp:serve` — how Claude Desktop, Cursor,
-and most local clients launch a server) and Streamable HTTP (`/mcp`, an
-ordinary route), both implementing the `2026-07-28` revision's
-stateless, per-request model. Every message is its own unit of work: a
-fresh request scope,
+Two transports: stdio (`kinetis mcp:serve` — how Claude Code, Codex and
+most local clients launch a server) and Streamable HTTP (`/mcp`, an
+ordinary route), both on MCP `2025-06-18`, over the JSON-RPC and stdio
+mechanics in
+[`kinetis/mcp-protocol`](https://github.com/kinetis-dev/mcp-protocol).
+The server keeps no session state, so one instance serves a persistent
+stdio process and a stateless HTTP route alike. Every message is its own
+unit of work: a fresh request scope,
 transaction rollback for anything a tool leaves open, disposal once the
 response is written. The `mcp` middleware group authenticates the HTTP
 endpoint with the same middleware the auth packages ship for routes, and

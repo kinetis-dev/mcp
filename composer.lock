@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "6f0667471d642d09e60a25a185e5ba57",
+    "content-hash": "c07c7922297c0463003eb1fe531b76da",
     "packages": [
         {
             "name": "graham-campbell/result-type",
@@ -128,6 +128,47 @@
                 }
             ],
             "description": "The Runtime-Aware PHP Framework",
+            "transport-options": {
+                "relative": true
+            }
+        },
+        {
+            "name": "kinetis/mcp-protocol",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../mcp-protocol",
+                "reference": "a920c32b51bd6f01fbbe8a59875443eee244135d"
+            },
+            "require": {
+                "php": "^8.4"
+            },
+            "require-dev": {
+                "infection/infection": "^0.35.0",
+                "phpstan/phpstan": "^2.2.8",
+                "phpunit/phpunit": "^13.3.3",
+                "vimeo/psalm": "^6.17"
+            },
+            "type": "library",
+            "autoload": {
+                "psr-4": {
+                    "Kinetis\\McpProtocol\\": "src/"
+                }
+            },
+            "autoload-dev": {
+                "psr-4": {
+                    "Kinetis\\McpProtocol\\Tests\\": "tests/"
+                }
+            },
+            "license": [
+                "MIT"
+            ],
+            "authors": [
+                {
+                    "name": "Alon Noy"
+                }
+            ],
+            "description": "Model Context Protocol 2025-06-18 over JSON-RPC 2.0 — envelope validation, typed tool and resource contracts, progress notifications, and checked newline-delimited stdio framing. Requires PHP only.",
             "transport-options": {
                 "relative": true
             }
@@ -7351,7 +7392,8 @@
     "minimum-stability": "stable",
     "stability-flags": {
         "kinetis/auth": 20,
-        "kinetis/framework": 20
+        "kinetis/framework": 20,
+        "kinetis/mcp-protocol": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,

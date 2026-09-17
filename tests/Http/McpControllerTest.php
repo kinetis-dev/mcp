@@ -11,9 +11,9 @@ use Kinetis\Http\Routing\Router;
 use Kinetis\Http\StreamedResponse;
 use Kinetis\Mcp\Http\McpController;
 use Kinetis\Mcp\Http\McpOriginMiddleware;
+use Kinetis\Mcp\KinetisMcpApplication;
 use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
-use Kinetis\Mcp\McpServer;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\DisposalFailingToolController;
 use Kinetis\Mcp\Tests\Fixtures\DisposalRecorder;
@@ -33,6 +33,8 @@ use Kinetis\Mcp\Tests\Fixtures\ThrowingLogger;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingResourceController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowsAfterFirstResolutionLogger;
 use Kinetis\Mcp\Tests\Fixtures\UserController;
+use Kinetis\McpProtocol\McpServer;
+use Kinetis\McpProtocol\ServerInfo;
 use Nyholm\Psr7\ServerRequest;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\ResponseInterface;
@@ -41,54 +43,29 @@ use RuntimeException;
 use Throwable;
 
 /**
- * The /mcp endpoint as an ordinary route: every transport-level behavior
- * Kernel used to special-case — mirrored headers, origin validation, the
- * SSE progress stream, the spec's own 405s — now lives on McpController
- * and is exercised through a real Kernel::handle() call, the same way any
- * other route is.
+ * The /mcp endpoint as an ordinary route: MCP 2025-06-18 Streamable HTTP,
+ * origin validation, the `mcp` middleware group, the SSE progress stream,
+ * and the spec's own 405s, all exercised through a real Kernel::handle()
+ * call the same way any other route is.
+ *
+ * `MCP-Protocol-Version` is the only protocol header this transport has.
+ * Sessions are optional in this revision and this server issues none, so
+ * nothing here carries or expects an `Mcp-Session-Id`.
  */
 final class McpControllerTest extends TestCase
 {
-    /**
-     * The `_meta` every request needs — required by the 2026-07-28
-     * protocol, the only revision this server implements.
-     *
-     * @return array<string, mixed>
-     */
-    private function meta(): array
-    {
-        return [
-            'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
-            'io.modelcontextprotocol/clientCapabilities' => (object) [],
-        ];
-    }
+    private const string PROTOCOL_VERSION = '2025-06-18';
 
     /**
-     * A real POST /mcp request carrying headers that match its own
-     * body, per the transport's header-mirroring requirement —
-     * McpController::headerMismatch() rejects any request lacking
-     * them, so every ordinary (non-header-testing) test needs both.
-     * $body's own params._meta, if given, is merged over the required
-     * protocolVersion/clientCapabilities pair — a caller adding e.g.
-     * progressToken doesn't have to repeat both. Mcp-Name is derived
-     * from params.name/params.uri when present.
+     * A real POST /mcp request carrying the protocol-version header every
+     * non-initialize message needs.
      *
      * @param array<string, mixed> $body
      */
     private function mcpRequest(array $body, string $path = '/mcp'): ServerRequest
     {
-        $method = $body['method'] ?? null;
-        $params = is_array($body['params'] ?? null) ? $body['params'] : [];
-        $params['_meta'] = [...$this->meta(), ...(is_array($params['_meta'] ?? null) ? $params['_meta'] : [])];
-        $body['params'] = $params;
-
-        $request = (new ServerRequest('POST', $path, body: json_encode($body)))
-            ->withHeader('MCP-Protocol-Version', '2026-07-28')
-            ->withHeader('Mcp-Method', (string) $method);
-
-        $name = $params['name'] ?? $params['uri'] ?? null;
-
-        return $name !== null ? $request->withHeader('Mcp-Name', (string) $name) : $request;
+        return new ServerRequest('POST', $path, body: json_encode($body))
+            ->withHeader('MCP-Protocol-Version', self::PROTOCOL_VERSION);
     }
 
     /**
@@ -132,13 +109,11 @@ final class McpControllerTest extends TestCase
     {
         $kernel = $this->mcpEnabledKernel();
 
-        $request = $this->mcpRequest([
+        $response = $kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'tools/list',
-        ], path: '/mcp/');
-
-        $response = $kernel->handle($request);
+        ], path: '/mcp/'));
 
         self::assertSame(200, $response->getStatusCode());
         $body = json_decode((string) $response->getBody(), true);
@@ -146,25 +121,21 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * The same terminal-boundary regression as McpServerTest's own, run
-     * through a real Kernel request/response cycle: -32603 is not one of
-     * httpStatus()'s mapped codes, so this stays a 200 with the error
-     * inside the JSON-RPC envelope — a broken logger must not turn that
-     * into a crashed request or a leaked secret either.
+     * The terminal-boundary regression, run through a real Kernel
+     * request/response cycle: a protocol error after a valid envelope
+     * stays a 200 carrying the JSON-RPC error, and a broken logger must
+     * not turn that into a crashed request or a leaked secret either.
      */
     public function test_a_failing_resource_with_a_throwing_logger_still_returns_a_generic_error_over_http(): void
     {
-        $logger = new ThrowingLogger();
-        $kernel = $this->mcpEnabledKernelWithThrowingResource($logger);
+        $kernel = $this->mcpEnabledKernelWithThrowingResource(new ThrowingLogger());
 
-        $request = $this->mcpRequest([
+        $response = $kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'resources/read',
             'params' => ['uri' => 'kinetis://throws'],
-        ]);
-
-        $response = $kernel->handle($request);
+        ]));
 
         self::assertSame(200, $response->getStatusCode());
         $rawBody = (string) $response->getBody();
@@ -179,11 +150,10 @@ final class McpControllerTest extends TestCase
 
     /**
      * A well-formed, oversized JSON-RPC body — McpController::serve()
-     * itself never gets far enough to answer "Parse error." for this
-     * one. RequestBodyMiddleware stages and counts the body before any
-     * handler runs, so this is a 413 before McpServer ever sees a
-     * decoded message and before the controller's own header check
-     * runs. No Content-Length header at all, so the declared-header
+     * itself never gets far enough to answer "Parse error." for this one.
+     * RequestBodyMiddleware stages and counts the body before any handler
+     * runs, so this is a 413 before the server ever sees a decoded
+     * message. No Content-Length header at all, so the declared-header
      * check cannot catch it either — only the staged byte count can.
      */
     public function test_an_oversized_mcp_body_with_no_content_length_is_rejected_with_413(): void
@@ -204,8 +174,8 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * The same oversized body, this time with a Content-Length header
-     * that understates the real size below the configured cap — the
+     * The same oversized body, this time with a Content-Length header that
+     * understates the real size below the configured cap — the
      * declared-header check alone would pass this through, so only the
      * actual-bytes-read backstop closes it.
      */
@@ -232,12 +202,9 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * The control: a genuinely small, well-formed request under the
-     * same configured cap must still be processed normally — the fix
-     * closes a real gap without breaking the endpoint for anyone who
-     * fits under the limit. The cap is sized to comfortably fit a real
-     * request's own required `_meta`, not shrunk to fit an artificially
-     * tiny body.
+     * The control: a genuinely small, well-formed request under the same
+     * configured cap must still be processed normally — the cap closes a
+     * real gap without breaking the endpoint for anyone who fits under it.
      */
     public function test_a_small_mcp_body_under_the_configured_limit_is_processed_normally(): void
     {
@@ -245,8 +212,8 @@ final class McpControllerTest extends TestCase
 
         $request = $this->mcpRequest(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list']);
         // getSize(), never (string) — the latter reads (and leaves
-        // consumed) the same PSR-7 stream the kernel is about to read
-        // from itself.
+        // consumed) the same PSR-7 stream the kernel is about to read from
+        // itself.
         self::assertLessThanOrEqual(500, $request->getBody()->getSize());
 
         $response = $kernel->handle($request);
@@ -257,10 +224,10 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * A middleware that inspected the staged body leaves its cursor at
-     * the end, where `getContents()` answers with an empty string. The
-     * controller reads the replayable full representation instead, so
-     * the whole envelope — arguments included — still reaches the tool.
+     * A middleware that inspected the staged body leaves its cursor at the
+     * end, where `getContents()` answers with an empty string. The
+     * controller reads the replayable full representation instead, so the
+     * whole envelope — arguments included — still reaches the tool.
      */
     public function test_the_whole_envelope_reaches_the_tool_after_a_middleware_read_the_body(): void
     {
@@ -288,69 +255,7 @@ final class McpControllerTest extends TestCase
         );
     }
 
-    // --- /mcp Origin validation and #[AsMcpMiddleware]/
-    // #[AsOpenApiMiddleware] scoped pipelines. ---
-
-    /**
-     * A Kernel with the /mcp route registered the way discovery would
-     * register it in a real application: McpController as an ordinary
-     * controller, the `mcp` middleware group carrying the origin check,
-     * and McpServer bound on AppScope the way this package's bootstrap
-     * binds it.
-     *
-     * @param list<class-string> $extraGroupMiddleware appended to the mcp group after the origin check
-     * @param array<string, string> $config
-     */
-    private function mcpEnabledKernel(array $extraGroupMiddleware = [], array $config = []): Kernel
-    {
-        $app = new AppScope();
-        $app->instance(Config::class, new Config($config));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(AccountController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
-        $app->boot();
-
-        $router = new Router();
-        $router->register(UserController::class);
-        $router->register(McpController::class);
-
-        return new Kernel(
-            $app,
-            $router,
-            middlewareGroups: ['mcp' => [McpOriginMiddleware::class, ...$extraGroupMiddleware]],
-        );
-    }
-
-    private function mcpToolsListRequest(): ServerRequest
-    {
-        return $this->mcpRequest(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list']);
-    }
-
-    /**
-     * The same shape as mcpEnabledKernel(), but registering
-     * ThrowingResourceController against a McpServer built with the
-     * given logger — the fixture this file's own terminal-boundary
-     * regression needs, distinct from every other test's AccountController
-     * server above.
-     */
-    private function mcpEnabledKernelWithThrowingResource(ThrowingLogger $logger): Kernel
-    {
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(ThrowingResourceController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app), logger: $logger));
-        $app->boot();
-
-        $router = new Router();
-        $router->register(McpController::class);
-
-        return new Kernel(
-            $app,
-            $router,
-            middlewareGroups: ['mcp' => [McpOriginMiddleware::class]],
-        );
-    }
+    // --- /mcp Origin validation and the scoped `mcp` middleware group. ---
 
     public function test_a_request_with_no_origin_header_reaches_mcp_regardless_of_the_allow_list(): void
     {
@@ -365,8 +270,7 @@ final class McpControllerTest extends TestCase
     {
         $kernel = $this->mcpEnabledKernel(config: ['MCP_ALLOWED_ORIGINS' => 'https://allowed.example']);
 
-        $request = $this->mcpToolsListRequest()->withHeader('Origin', 'https://evil.example');
-        $response = $kernel->handle($request);
+        $response = $kernel->handle($this->mcpToolsListRequest()->withHeader('Origin', 'https://evil.example'));
 
         self::assertSame(403, $response->getStatusCode());
     }
@@ -375,8 +279,18 @@ final class McpControllerTest extends TestCase
     {
         $kernel = $this->mcpEnabledKernel(config: ['MCP_ALLOWED_ORIGINS' => 'https://allowed.example']);
 
-        $request = $this->mcpToolsListRequest()->withHeader('Origin', 'https://allowed.example');
-        $response = $kernel->handle($request);
+        $response = $kernel->handle($this->mcpToolsListRequest()->withHeader('Origin', 'https://allowed.example'));
+
+        self::assertSame(200, $response->getStatusCode());
+    }
+
+    public function test_each_comma_separated_allowed_origin_is_trimmed(): void
+    {
+        $kernel = $this->mcpEnabledKernel(config: [
+            'MCP_ALLOWED_ORIGINS' => 'https://first.example, https://second.example',
+        ]);
+
+        $response = $kernel->handle($this->mcpToolsListRequest()->withHeader('Origin', 'https://second.example'));
 
         self::assertSame(200, $response->getStatusCode());
     }
@@ -385,8 +299,7 @@ final class McpControllerTest extends TestCase
     {
         $kernel = $this->mcpEnabledKernel();
 
-        $request = $this->mcpToolsListRequest()->withHeader('Origin', 'https://anything.example');
-        $response = $kernel->handle($request);
+        $response = $kernel->handle($this->mcpToolsListRequest()->withHeader('Origin', 'https://anything.example'));
 
         self::assertSame(403, $response->getStatusCode());
     }
@@ -415,17 +328,11 @@ final class McpControllerTest extends TestCase
      */
     public function test_the_mcp_group_runs_inside_the_global_pipeline_not_instead_of_it(): void
     {
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(AccountController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
+        $app = $this->appWith(AccountController::class);
         $app->middleware(GlobalMiddleware::class);
         $app->boot();
 
-        $router = new Router();
-        $router->register(McpController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [McpGroupMiddleware::class]]);
+        $kernel = $this->kernelFor($app, ['mcp' => [McpGroupMiddleware::class]]);
 
         RecordingMiddleware::$log = [];
         $kernel->handle($this->mcpToolsListRequest());
@@ -433,15 +340,189 @@ final class McpControllerTest extends TestCase
         self::assertSame([GlobalMiddleware::class, McpGroupMiddleware::class], RecordingMiddleware::$log);
     }
 
+    // --- MCP 2025-06-18 Streamable HTTP. ---
+
+    public function test_initialize_is_accepted_without_the_protocol_version_header(): void
+    {
+        $kernel = $this->emptyMcpKernel();
+
+        $request = new ServerRequest('POST', '/mcp', body: json_encode([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => [
+                'protocolVersion' => '2025-11-25',
+                'capabilities' => (object) [],
+                'clientInfo' => ['name' => 'claude-code', 'version' => '2.1.273'],
+            ],
+        ]));
+
+        $response = $kernel->handle($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getBody(), true);
+        self::assertSame(self::PROTOCOL_VERSION, $body['result']['protocolVersion']);
+        self::assertSame('', $response->getHeaderLine('Mcp-Session-Id'));
+    }
+
+    public function test_a_subsequent_request_carrying_the_protocol_version_header_is_accepted(): void
+    {
+        $kernel = $this->emptyMcpKernel();
+
+        $response = $kernel->handle($this->mcpRequest(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'ping']));
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame([], json_decode((string) $response->getBody(), true)['result']);
+    }
+
+    /**
+     * A missing header on a non-initialize message means the spec's
+     * 2025-03-26 fallback, which this single-version server does not
+     * implement. Nothing is remembered from an earlier request to stand in
+     * for it, so it is refused rather than assumed.
+     */
+    public function test_a_subsequent_request_without_the_protocol_version_header_is_rejected(): void
+    {
+        $kernel = $this->emptyMcpKernel();
+
+        $request = new ServerRequest('POST', '/mcp', body: json_encode([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'tools/list',
+        ]));
+
+        $response = $kernel->handle($request);
+
+        self::assertSame(400, $response->getStatusCode());
+        $body = json_decode((string) $response->getBody(), true);
+        self::assertSame(-32600, $body['error']['code']);
+        self::assertSame(1, $body['id']);
+    }
+
+    /**
+     * Initializing once does not let the next request omit its header:
+     * this transport keeps no negotiated state, which is what makes one
+     * server instance safe behind a stateless HTTP route.
+     */
+    public function test_an_earlier_initialize_does_not_excuse_a_later_missing_header(): void
+    {
+        $kernel = $this->emptyMcpKernel();
+
+        $kernel->handle(new ServerRequest('POST', '/mcp', body: json_encode([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => [
+                'protocolVersion' => self::PROTOCOL_VERSION,
+                'capabilities' => (object) [],
+                'clientInfo' => ['name' => 'probe', 'version' => '1.0'],
+            ],
+        ])));
+
+        $response = $kernel->handle(new ServerRequest('POST', '/mcp', body: json_encode([
+            'jsonrpc' => '2.0',
+            'id' => 2,
+            'method' => 'tools/list',
+        ])));
+
+        self::assertSame(400, $response->getStatusCode());
+    }
+
+    public function test_an_unsupported_protocol_version_header_is_rejected(): void
+    {
+        $kernel = $this->emptyMcpKernel();
+
+        $request = $this->mcpRequest(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list'])
+            ->withHeader('MCP-Protocol-Version', '2026-07-28');
+
+        $response = $kernel->handle($request);
+
+        self::assertSame(400, $response->getStatusCode());
+        $body = json_decode((string) $response->getBody(), true);
+        self::assertSame(-32600, $body['error']['code']);
+        self::assertStringContainsString(self::PROTOCOL_VERSION, $body['error']['message']);
+    }
+
+    /**
+     * Even `initialize` is refused when it names a version this server
+     * does not speak in the header: the header is the transport's own
+     * claim, distinct from the body's `protocolVersion`, which is
+     * negotiated rather than refused.
+     */
+    public function test_initialize_with_an_unsupported_protocol_version_header_is_rejected(): void
+    {
+        $kernel = $this->emptyMcpKernel();
+
+        $request = new ServerRequest('POST', '/mcp', body: json_encode([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => [
+                'protocolVersion' => self::PROTOCOL_VERSION,
+                'capabilities' => (object) [],
+                'clientInfo' => ['name' => 'probe', 'version' => '1.0'],
+            ],
+        ]))->withHeader('MCP-Protocol-Version', '2024-11-05');
+
+        self::assertSame(400, $kernel->handle($request)->getStatusCode());
+    }
+
+    /**
+     * An earlier revision of this transport mirrored `method` and
+     * `params.name` into headers and refused a request whose headers did
+     * not match. Those headers are not part of `2025-06-18`: a client
+     * still sending them is answered normally, and a value contradicting
+     * the body changes nothing.
+     */
+    public function test_the_removed_mirrored_headers_are_ignored_rather_than_checked(): void
+    {
+        $kernel = $this->mcpEnabledKernel();
+
+        $request = $this->mcpRequest([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'tools/call',
+            'params' => ['name' => 'get_user_status', 'arguments' => ['userId' => 7]],
+        ])
+            ->withHeader('Mcp-Method', 'resources/read')
+            ->withHeader('Mcp-Name', 'some_other_tool');
+
+        $response = $kernel->handle($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getBody(), true);
+        self::assertFalse($body['result']['isError']);
+        self::assertSame(
+            ['userId' => 7, 'status' => 'active'],
+            json_decode($body['result']['content'][0]['text'], true),
+        );
+    }
+
     public function test_mcp_endpoint_returns_202_for_a_notification(): void
     {
         $kernel = $this->emptyMcpKernel();
 
-        $request = $this->mcpRequest(['jsonrpc' => '2.0', 'method' => 'tools/list']);
-
-        $response = $kernel->handle($request);
+        $response = $kernel->handle($this->mcpRequest([
+            'jsonrpc' => '2.0',
+            'method' => 'notifications/initialized',
+        ]));
 
         self::assertSame(202, $response->getStatusCode());
+        self::assertSame('', (string) $response->getBody());
+    }
+
+    public function test_a_client_response_message_is_accepted_and_never_answered(): void
+    {
+        $kernel = $this->emptyMcpKernel();
+
+        $response = $kernel->handle($this->mcpRequest([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'result' => (object) [],
+        ]));
+
+        self::assertSame(202, $response->getStatusCode());
+        self::assertSame('', (string) $response->getBody());
     }
 
     public function test_mcp_endpoint_returns_405_for_get_since_no_server_initiated_stream_is_supported(): void
@@ -451,18 +532,14 @@ final class McpControllerTest extends TestCase
         $response = $kernel->handle(new ServerRequest('GET', '/mcp'));
 
         self::assertSame(405, $response->getStatusCode());
+        self::assertSame('POST', $response->getHeaderLine('Allow'));
     }
 
     public function test_mcp_endpoint_returns_405_for_delete_since_session_termination_is_not_supported(): void
     {
-        // Checked directly against the real 2026-07-28 spec text, not
-        // assumed: a server implementing only this revision "SHOULD"
-        // answer 405 to a DELETE /mcp the same way it does a GET —
-        // DELETE used to terminate a session under the now-removed
-        // Mcp-Session-Id mechanism from earlier Streamable HTTP
-        // revisions. This route is deliberately intercepted by the same
-        // scoped $mcpPipeline as GET now, rather than falling through to
-        // the router's own 404 for an unmatched path/method.
+        // DELETE terminates a session under the optional Mcp-Session-Id
+        // mechanism. This server issues no session, so the route answers
+        // the router's ordinary 405 rather than implementing one.
         $kernel = $this->emptyMcpKernel();
 
         $response = $kernel->handle(new ServerRequest('DELETE', '/mcp'));
@@ -471,102 +548,44 @@ final class McpControllerTest extends TestCase
         self::assertSame('POST', $response->getHeaderLine('Allow'));
     }
 
-    public function test_a_request_with_matching_headers_succeeds(): void
+    /**
+     * A method this server does not implement is understood but
+     * unanswerable, which is a JSON-RPC outcome rather than a transport
+     * one: 200 with the error in the envelope.
+     */
+    public function test_an_unknown_method_is_a_json_rpc_error_inside_a_200(): void
     {
         $kernel = $this->emptyMcpKernel();
 
-        $request = $this->mcpRequest([
+        $response = $kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 1,
-            'method' => 'server/discover',
-        ]);
-
-        $response = $kernel->handle($request);
+            'method' => 'prompts/list',
+        ]));
 
         self::assertSame(200, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame('complete', $body['result']['resultType']);
+        self::assertSame(-32601, json_decode((string) $response->getBody(), true)['error']['code']);
     }
 
-    public function test_a_request_missing_the_protocol_version_header_is_rejected(): void
+    public function test_malformed_json_is_a_parse_error_with_a_400(): void
     {
         $kernel = $this->emptyMcpKernel();
 
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'server/discover',
-        ])->withoutHeader('MCP-Protocol-Version');
+        $request = new ServerRequest('POST', '/mcp', body: '{"jsonrpc":')
+            ->withHeader('MCP-Protocol-Version', self::PROTOCOL_VERSION);
 
         $response = $kernel->handle($request);
 
         self::assertSame(400, $response->getStatusCode());
         $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32020, $body['error']['code']);
-    }
-
-    public function test_a_request_with_a_mismatched_method_header_is_rejected(): void
-    {
-        $kernel = $this->emptyMcpKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'server/discover',
-        ])->withHeader('Mcp-Method', 'tools/list');
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32020, $body['error']['code']);
-    }
-
-    public function test_an_unknown_method_maps_to_a_404(): void
-    {
-        $kernel = $this->emptyMcpKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'does/not/exist',
-        ]);
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(404, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32601, $body['error']['code']);
-    }
-
-    public function test_an_unsupported_protocol_version_maps_to_a_400(): void
-    {
-        $kernel = $this->emptyMcpKernel();
-
-        $request = (new ServerRequest('POST', '/mcp', body: json_encode([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/list',
-            'params' => ['_meta' => [
-                'io.modelcontextprotocol/protocolVersion' => '1999-01-01',
-                'io.modelcontextprotocol/clientCapabilities' => (object) [],
-            ]],
-        ])))
-            ->withHeader('MCP-Protocol-Version', '1999-01-01')
-            ->withHeader('Mcp-Method', 'tools/list');
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32022, $body['error']['code']);
+        self::assertSame(-32700, $body['error']['code']);
+        self::assertNull($body['id']);
     }
 
     /**
-     * Batching is not supported by the 2026-07-28 revision this server
-     * implements — a top-level JSON array must be rejected the same way
-     * as any other malformed envelope, never turned into a 202/no-body
-     * response the way a genuine notification would produce.
+     * Batching is not part of this revision — a top-level JSON array must
+     * be rejected the same way as any other malformed envelope, never
+     * turned into the 202/no-body response a genuine notification gets.
      */
     public function test_a_top_level_json_array_body_is_rejected_with_400_not_202(): void
     {
@@ -577,7 +596,10 @@ final class McpControllerTest extends TestCase
             ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'resources/list'],
         ]);
 
-        $response = $kernel->handle(new ServerRequest('POST', '/mcp', body: $batch));
+        $request = new ServerRequest('POST', '/mcp', body: $batch)
+            ->withHeader('MCP-Protocol-Version', self::PROTOCOL_VERSION);
+
+        $response = $kernel->handle($request);
 
         self::assertSame(400, $response->getStatusCode());
         $body = json_decode((string) $response->getBody(), true);
@@ -586,237 +608,26 @@ final class McpControllerTest extends TestCase
     }
 
     /**
-     * The ordering fix this class exists for: a structurally invalid
-     * body must be rejected as -32600 before the mirrored-header check
-     * ever runs, even when the headers themselves would also fail —
-     * never -32020, which would wrongly imply the body was otherwise a
-     * valid, well-formed request.
+     * A structurally invalid body is rejected before the header check ever
+     * runs, even when the header would also fail — reporting the header
+     * would wrongly imply the body was an otherwise well-formed request.
      */
-    public function test_structural_validation_runs_before_the_mirrored_header_check(): void
+    public function test_structural_validation_runs_before_the_protocol_version_check(): void
     {
         $kernel = $this->emptyMcpKernel();
 
-        $request = (new ServerRequest('POST', '/mcp', body: json_encode([
-            // No "jsonrpc" member at all — structurally invalid.
-            'id' => 1,
-            'method' => 'tools/list',
-        ])))
-            ->withHeader('MCP-Protocol-Version', 'not-even-close')
-            ->withHeader('Mcp-Method', 'also-wrong');
+        // No "jsonrpc" member at all — structurally invalid.
+        $request = new ServerRequest('POST', '/mcp', body: json_encode(['id' => 1, 'method' => 'tools/list']))
+            ->withHeader('MCP-Protocol-Version', 'not-even-close');
 
         $response = $kernel->handle($request);
 
         self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32600, $body['error']['code'], 'the structural failure must win, not the header mismatch');
+        self::assertSame(-32600, json_decode((string) $response->getBody(), true)['error']['code']);
     }
 
-    /**
-     * A progressToken present but of the wrong type must never open an
-     * SSE stream — McpServer::handle() would reject it once dispatched,
-     * and by then the response is already committed to
-     * text/event-stream. Refusing to stream here keeps the rejection an
-     * ordinary, bufferable JSON error response instead.
-     */
-    public function test_a_malformed_progress_token_gets_an_ordinary_json_error_not_a_stream(): void
-    {
-        $kernel = $this->progressMcpKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'count_to_three', '_meta' => ['progressToken' => ['not', 'valid']]],
-        ]);
-
-        $response = $kernel->handle($request);
-
-        self::assertNotInstanceOf(StreamedResponse::class, $response);
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32602, $body['error']['code']);
-    }
-
-    public function test_tools_call_with_a_matching_mcp_name_header_succeeds(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'get_user_status', 'arguments' => ['userId' => 7]],
-        ]);
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(200, $response->getStatusCode());
-    }
-
-    public function test_tools_call_with_a_mismatched_mcp_name_header_is_rejected(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'get_user_status', 'arguments' => ['userId' => 7]],
-        ])->withHeader('Mcp-Name', 'create_user');
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32020, $body['error']['code']);
-    }
-
-    public function test_tools_call_with_a_missing_mcp_name_header_is_rejected(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'get_user_status', 'arguments' => ['userId' => 7]],
-        ])->withoutHeader('Mcp-Name');
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32020, $body['error']['code']);
-    }
-
-    public function test_resources_read_with_a_matching_mcp_name_header_succeeds(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'resources/read',
-            'params' => ['uri' => 'kinetis://status'],
-        ]);
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(200, $response->getStatusCode());
-    }
-
-    public function test_resources_read_with_a_mismatched_mcp_name_header_is_rejected(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'resources/read',
-            'params' => ['uri' => 'kinetis://status'],
-        ])->withHeader('Mcp-Name', 'kinetis://something-else');
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32020, $body['error']['code']);
-    }
-
-    public function test_a_base64_sentinel_encoded_mcp_name_header_is_decoded_before_comparing(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        $encoded = '=?base64?' . base64_encode('get_user_status') . '?=';
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'get_user_status', 'arguments' => ['userId' => 7]],
-        ])->withHeader('Mcp-Name', $encoded);
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(200, $response->getStatusCode());
-    }
-
-    public function test_a_malformed_base64_sentinel_mcp_name_header_fails_closed(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'get_user_status', 'arguments' => ['userId' => 7]],
-        ])->withHeader('Mcp-Name', '=?base64?not valid base64!!!?=');
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32020, $body['error']['code']);
-    }
-
-    public function test_server_discover_does_not_require_an_mcp_name_header(): void
-    {
-        // server/discover has no name/uri in its body at all — the one
-        // method already covered by the matching-headers test above, but
-        // worth a dedicated assertion that this specific header isn't
-        // demanded where the spec doesn't require it.
-        $kernel = $this->emptyMcpKernel();
-
-        $request = $this->mcpRequest(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'server/discover']);
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(200, $response->getStatusCode());
-    }
-
-    public function test_a_request_missing_headers_is_rejected(): void
-    {
-        $kernel = $this->mcpEnabledKernel();
-
-        // Otherwise a fully valid body — preflight() runs before the
-        // header check, so a body that would *also* fail preflight (a
-        // missing _meta, for instance) is caught there first, with its
-        // own -32602, not reported as a header mismatch. This test wants
-        // to isolate the header check itself.
-        $request = new ServerRequest('POST', '/mcp', body: json_encode([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/list',
-            'params' => ['_meta' => $this->meta()],
-        ]));
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        $body = json_decode((string) $response->getBody(), true);
-        self::assertSame(-32020, $body['error']['code']);
-    }
-
-    // --- The empty-list-vs-empty-object and present-null distinction,
-    // through real HTTP bytes — mcpRequest()'s own merge logic silently
-    // drops a malformed _meta before it ever reaches the body, so every
-    // case here builds the request directly, with headers computed by
-    // hand to match, isolating the shape check itself from the header
-    // check already covered above. ---
-
-    /**
-     * @return array<string, string>
-     */
-    private function matchingHeaders(string $method, ?string $name = null): array
-    {
-        $headers = ['MCP-Protocol-Version' => '2026-07-28', 'Mcp-Method' => $method];
-
-        if ($name !== null) {
-            $headers['Mcp-Name'] = $name;
-        }
-
-        return $headers;
-    }
+    // --- The empty-list-versus-empty-object distinction, through real
+    // HTTP bytes. ---
 
     public function test_an_empty_json_array_params_is_rejected_over_http(): void
     {
@@ -825,7 +636,7 @@ final class McpControllerTest extends TestCase
         $request = new ServerRequest(
             'POST',
             '/mcp',
-            headers: $this->matchingHeaders('tools/list'),
+            headers: ['MCP-Protocol-Version' => self::PROTOCOL_VERSION],
             body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":[]}',
         );
 
@@ -842,308 +653,103 @@ final class McpControllerTest extends TestCase
         $request = new ServerRequest(
             'POST',
             '/mcp',
-            headers: $this->matchingHeaders('tools/list'),
-            body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}',
+            headers: ['MCP-Protocol-Version' => self::PROTOCOL_VERSION],
+            body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
+        );
+
+        self::assertSame(200, $kernel->handle($request)->getStatusCode());
+    }
+
+    /**
+     * A nested object argument keeps its JSON provenance all the way to
+     * hydration: `{}` reaching a tool as an empty object, never as the
+     * empty list the same PHP value would otherwise be indistinguishable
+     * from.
+     */
+    public function test_a_nested_empty_object_argument_survives_the_http_boundary(): void
+    {
+        $kernel = $this->mcpEnabledKernel();
+
+        $request = new ServerRequest(
+            'POST',
+            '/mcp',
+            headers: ['MCP-Protocol-Version' => self::PROTOCOL_VERSION],
+            body: '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_user","arguments":'
+                . '{"data":{"name":"Alon","email":"alon@example.com"}}}}',
         );
 
         $response = $kernel->handle($request);
 
         self::assertSame(200, $response->getStatusCode());
+        $body = json_decode((string) $response->getBody(), true);
+        self::assertFalse($body['result']['isError']);
     }
 
-    public function test_a_present_null_meta_is_rejected_over_http(): void
+    /**
+     * A progressToken present but of the wrong type must never open an SSE
+     * stream — the server rejects it once dispatched, and by then a
+     * streamed response would already be committed to text/event-stream.
+     */
+    public function test_a_malformed_progress_token_gets_an_ordinary_json_error_not_a_stream(): void
     {
-        $kernel = $this->emptyMcpKernel();
+        $kernel = $this->progressMcpKernel();
 
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: $this->matchingHeaders('tools/list'),
-            body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":null}}',
-        );
+        $response = $kernel->handle($this->mcpRequest([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'tools/call',
+            'params' => ['name' => 'count_to_three', '_meta' => ['progressToken' => ['not', 'valid']]],
+        ]));
 
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
-        self::assertSame(-32602, json_decode((string) $response->getBody(), true)['error']['code']);
-    }
-
-    public function test_an_empty_list_client_capabilities_is_rejected_over_http(): void
-    {
-        $kernel = $this->emptyMcpKernel();
-
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: $this->matchingHeaders('tools/list'),
-            body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":[]}}}',
-        );
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(400, $response->getStatusCode());
+        self::assertNotInstanceOf(StreamedResponse::class, $response);
+        self::assertSame(200, $response->getStatusCode());
         self::assertSame(-32602, json_decode((string) $response->getBody(), true)['error']['code']);
     }
 
     /**
-     * A valid-looking progressToken paired with a malformed `arguments`
-     * must never open the SSE stream — the malformed value is discovered
-     * by preflight() before stream selection runs at all, not once the
-     * stream has already committed the response to text/event-stream.
+     * A tools/call *notification* — no `id` at all — never opens a stream
+     * and never runs the tool: there is no response to carry a result or
+     * an error to, and every notification this revision defines asks this
+     * server for nothing.
      */
-    public function test_a_valid_progress_token_with_malformed_arguments_never_streams(): void
-    {
-        $kernel = $this->progressMcpKernel();
-
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: $this->matchingHeaders('tools/call', 'count_to_three'),
-            body: json_encode([
-                'jsonrpc' => '2.0',
-                'id' => 1,
-                'method' => 'tools/call',
-                'params' => [
-                    'name' => 'count_to_three',
-                    'arguments' => [1, 2, 3],
-                    '_meta' => [...$this->meta(), 'progressToken' => 'tok'],
-                ],
-            ]),
-        );
-
-        $response = $kernel->handle($request);
-
-        self::assertNotInstanceOf(StreamedResponse::class, $response);
-        self::assertSame(400, $response->getStatusCode());
-        self::assertSame(-32602, json_decode((string) $response->getBody(), true)['error']['code']);
-    }
-
-    /**
-     * Same proof, this time with malformed clientCapabilities instead of
-     * arguments — the point being that preflight() covers the full
-     * request, not just the one field wantsProgressStream() itself
-     * inspects.
-     */
-    public function test_a_valid_progress_token_with_malformed_client_capabilities_never_streams(): void
-    {
-        $kernel = $this->progressMcpKernel();
-
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: $this->matchingHeaders('tools/call', 'count_to_three'),
-            body: json_encode([
-                'jsonrpc' => '2.0',
-                'id' => 1,
-                'method' => 'tools/call',
-                'params' => [
-                    'name' => 'count_to_three',
-                    '_meta' => [
-                        'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
-                        'io.modelcontextprotocol/clientCapabilities' => 'nope',
-                        'progressToken' => 'tok',
-                    ],
-                ],
-            ]),
-        );
-
-        $response = $kernel->handle($request);
-
-        self::assertNotInstanceOf(StreamedResponse::class, $response);
-        self::assertSame(400, $response->getStatusCode());
-        self::assertSame(-32602, json_decode((string) $response->getBody(), true)['error']['code']);
-    }
-
-    /**
-     * Same proof again, this time with a malformed `name` — the field
-     * nameHeaderMismatch() itself also reads. A warning-to-exception
-     * error handler is installed for the duration of this test
-     * specifically to prove the fix for the array-to-string cast this
-     * class's own docblock used to carry: preflight() must reject the
-     * malformed name before nameHeaderMismatch() ever runs, so no
-     * warning is ever emitted, let alone escalated.
-     */
-    public function test_a_valid_progress_token_with_a_malformed_name_never_streams_and_never_warns(): void
-    {
-        $kernel = $this->progressMcpKernel();
-
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: ['MCP-Protocol-Version' => '2026-07-28', 'Mcp-Method' => 'tools/call'],
-            body: json_encode([
-                'jsonrpc' => '2.0',
-                'id' => 1,
-                'method' => 'tools/call',
-                'params' => [
-                    'name' => ['not', 'a', 'string'],
-                    '_meta' => [...$this->meta(), 'progressToken' => 'tok'],
-                ],
-            ]),
-        );
-
-        set_error_handler(static function (int $errno, string $errstr): never {
-            throw new RuntimeException("Unexpected warning: {$errstr}");
-        });
-
-        try {
-            $response = $kernel->handle($request);
-        } finally {
-            restore_error_handler();
-        }
-
-        self::assertNotInstanceOf(StreamedResponse::class, $response);
-        self::assertSame(400, $response->getStatusCode());
-        self::assertSame(-32602, json_decode((string) $response->getBody(), true)['error']['code']);
-    }
-
-    /**
-     * A valid progressToken paired with a *missing* name — not just a
-     * malformed one — must also never open the stream: preflight()'s
-     * own name check requires presence now, not just type, precisely so
-     * this case is caught before wantsProgressStream() ever runs.
-     */
-    public function test_a_valid_progress_token_with_a_missing_name_never_streams(): void
-    {
-        $kernel = $this->progressMcpKernel();
-
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: ['MCP-Protocol-Version' => '2026-07-28', 'Mcp-Method' => 'tools/call'],
-            body: json_encode([
-                'jsonrpc' => '2.0',
-                'id' => 1,
-                'method' => 'tools/call',
-                'params' => [
-                    '_meta' => [...$this->meta(), 'progressToken' => 'tok'],
-                ],
-            ]),
-        );
-
-        $response = $kernel->handle($request);
-
-        self::assertNotInstanceOf(StreamedResponse::class, $response);
-        self::assertSame(400, $response->getStatusCode());
-        self::assertSame(-32602, json_decode((string) $response->getBody(), true)['error']['code']);
-    }
-
-    // --- Notification suppression over real HTTP: an envelope-valid
-    // notification (no id) whose nested content preflight() rejects
-    // must get 202, never 400 — and never open the SSE stream either,
-    // even with an otherwise-valid-looking progressToken. ---
-
-    public function test_a_notification_with_malformed_meta_gets_202_not_400(): void
-    {
-        $kernel = $this->emptyMcpKernel();
-
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: ['MCP-Protocol-Version' => '2026-07-28', 'Mcp-Method' => 'tools/list'],
-            body: '{"jsonrpc":"2.0","method":"tools/list","params":{"_meta":"nope"}}',
-        );
-
-        $response = $kernel->handle($request);
-
-        self::assertSame(202, $response->getStatusCode());
-    }
-
-    public function test_a_notification_with_a_malformed_progress_token_gets_202_and_never_streams(): void
-    {
-        $kernel = $this->progressMcpKernel();
-
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: ['MCP-Protocol-Version' => '2026-07-28', 'Mcp-Method' => 'tools/call'],
-            body: json_encode([
-                'jsonrpc' => '2.0',
-                'method' => 'tools/call',
-                'params' => [
-                    'name' => 'count_to_three',
-                    '_meta' => [...$this->meta(), 'progressToken' => ['not', 'valid']],
-                ],
-            ]),
-        );
-
-        $response = $kernel->handle($request);
-
-        self::assertNotInstanceOf(StreamedResponse::class, $response);
-        self::assertSame(202, $response->getStatusCode());
-    }
-
-    /**
-     * Streaming is request-only: a fully *valid* tools/call notification
-     * — no `id` at all, every other field well-formed including a valid
-     * progressToken — must not open the SSE stream just because a
-     * progress token happens to be present. It still gets the ordinary
-     * null-response → 202 path every other notification gets, and the
-     * tool genuinely still runs (JSON-RPC requires a server to process a
-     * notification, only never reply to it) — proven here via a static
-     * recorder, since the empty 202 body itself carries no evidence
-     * either way.
-     */
-    public function test_a_valid_tools_call_notification_with_a_valid_progress_token_never_streams_and_still_executes(): void
+    public function test_a_tools_call_notification_neither_streams_nor_runs_the_tool(): void
     {
         NotificationExecutionRecorder::$calls = 0;
-        $kernel = $this->progressNotificationMcpKernel();
+        $kernel = $this->kernelWith(ProgressNotificationToolController::class);
 
-        $request = new ServerRequest(
-            'POST',
-            '/mcp',
-            headers: $this->matchingHeaders('tools/call', 'count_to_three_and_record'),
-            body: json_encode([
-                'jsonrpc' => '2.0',
-                'method' => 'tools/call',
-                'params' => [
-                    'name' => 'count_to_three_and_record',
-                    '_meta' => [...$this->meta(), 'progressToken' => 'tok'],
-                ],
-            ]),
-        );
-
-        $response = $kernel->handle($request);
+        $response = $kernel->handle($this->mcpRequest([
+            'jsonrpc' => '2.0',
+            'method' => 'tools/call',
+            'params' => ['name' => 'count_to_three_and_record', '_meta' => ['progressToken' => 'tok']],
+        ]));
 
         self::assertNotInstanceOf(StreamedResponse::class, $response);
         self::assertSame(202, $response->getStatusCode());
         self::assertSame('', (string) $response->getBody());
-        self::assertSame(1, NotificationExecutionRecorder::$calls, 'the tool must still genuinely run for a real notification');
+        self::assertSame(0, NotificationExecutionRecorder::$calls);
     }
 
     public function test_a_tools_call_with_a_progress_token_returns_a_streamed_sse_response(): void
     {
         $kernel = $this->progressMcpKernel();
 
-        $request = $this->mcpRequest([
+        $response = $kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'tools/call',
             'params' => ['name' => 'count_to_three', '_meta' => ['progressToken' => 'tok']],
-        ]);
-
-        $response = $kernel->handle($request);
+        ]));
 
         self::assertInstanceOf(StreamedResponse::class, $response);
         self::assertSame('text/event-stream', $response->getHeaderLine('Content-Type'));
 
-        // The emitter itself calls ob_flush()/flush() to push each chunk out
-        // immediately — a single ob_start() here would have those calls push
-        // straight to real stdout instead of accumulating. Nesting a second
-        // buffer lets the emitter's own flushes land in the outer one, which
-        // we then read back.
-        ob_start();
-        ob_start();
-        ($response->getEmitter())();
-        ob_end_clean();
-        $output = ob_get_clean();
-
-        $events = array_values(array_filter(explode("\n\n", trim($output))));
+        $events = $this->emit($response);
         self::assertCount(4, $events);
 
         $first = json_decode(substr($events[0], strlen('data: ')), true);
         self::assertSame('notifications/progress', $first['method']);
         self::assertSame(1, $first['params']['progress']);
+        self::assertSame('tok', $first['params']['progressToken']);
 
         $last = json_decode(substr($events[3], strlen('data: ')), true);
         self::assertSame(1, $last['id']);
@@ -1154,14 +760,12 @@ final class McpControllerTest extends TestCase
     {
         $kernel = $this->progressMcpKernel();
 
-        $request = $this->mcpRequest([
+        $response = $kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'tools/call',
             'params' => ['name' => 'count_to_three'],
-        ]);
-
-        $response = $kernel->handle($request);
+        ]));
 
         self::assertNotInstanceOf(StreamedResponse::class, $response);
         self::assertSame(200, $response->getStatusCode());
@@ -1170,87 +774,37 @@ final class McpControllerTest extends TestCase
 
     /**
      * The identity an `mcp`-group middleware published has to reach the
-     * tool on the streamed path too, or authentication would silently
-     * stop working the moment a client asks for progress.
+     * tool on the streamed path too, or authentication would silently stop
+     * working the moment a client asks for progress.
      */
     public function test_a_streamed_call_still_sees_the_identity_the_middleware_published(): void
     {
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(IdentityReportingController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
-        $app->boot();
+        $kernel = $this->kernelWith(IdentityReportingController::class, ['mcp' => [PublishesUserMiddleware::class]]);
 
-        $router = new Router();
-        $router->register(McpController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [PublishesUserMiddleware::class]]);
-
-        $request = $this->mcpRequest([
+        $response = $kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
             'id' => 1,
             'method' => 'tools/call',
             'params' => ['name' => 'whoami_streaming', '_meta' => ['progressToken' => 'tok']],
-        ]);
-
-        $response = $kernel->handle($request);
+        ]));
         self::assertInstanceOf(StreamedResponse::class, $response);
 
-        ob_start();
-        ob_start();
-        ($response->getEmitter())();
-        ob_end_clean();
-        $output = ob_get_clean();
-
-        $events = array_values(array_filter(explode("\n\n", trim($output))));
-        $final = json_decode(substr(end($events), strlen('data: ')), true);
-        $result = json_decode($final['result']['content'][0]['text'], true);
-
-        self::assertSame(['caller' => 'agent-7'], $result);
+        self::assertSame(['caller' => 'agent-7'], $this->toolResult($response));
     }
 
     /**
-     * @return array<string, mixed>
-     */
-    private function toolResult(ResponseInterface $response): array
-    {
-        if ($response instanceof StreamedResponse) {
-            ob_start();
-            ob_start();
-            ($response->getEmitter())();
-            ob_end_clean();
-            $output = ob_get_clean();
-
-            $events = array_values(array_filter(explode("\n\n", trim($output))));
-            $final = json_decode(substr(end($events), strlen('data: ')), true);
-        } else {
-            self::assertSame(200, $response->getStatusCode());
-            $final = json_decode((string) $response->getBody(), true);
-        }
-
-        return json_decode($final['result']['content'][0]['text'], true);
-    }
-
-    /**
-     * Identity is only the most visible case. A streamed call dispatches
-     * on the request's own scope, so *anything* an `mcp`-group middleware
-     * registered on it is there for the tool to inject, and a streamed
-     * call reports exactly what an ordinary one does. A scope of the
-     * stream's own would autowire a fresh RequestNote instead, carrying
-     * its default text.
+     * Identity is only the most visible case. A streamed call dispatches on
+     * the request's own scope, so anything an `mcp`-group middleware
+     * registered on it is there for the tool to inject, and a streamed call
+     * reports exactly what an ordinary one does. A scope of the stream's
+     * own would autowire a fresh RequestNote carrying its default text.
      */
     public function test_a_streamed_call_sees_any_object_the_middleware_published_on_the_request_scope(): void
     {
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(RequestNoteReportingController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
-        $app->boot();
-
-        $router = new Router();
-        $router->register(McpController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [PublishesRequestNoteMiddleware::class]]);
+        $kernel = $this->kernelWith(
+            RequestNoteReportingController::class,
+            ['mcp' => [PublishesRequestNoteMiddleware::class]],
+        );
 
         $ordinary = $this->toolResult($kernel->handle($this->mcpRequest([
             'jsonrpc' => '2.0',
@@ -1273,8 +827,8 @@ final class McpControllerTest extends TestCase
     /**
      * The tool call itself succeeds and returns a real result — but
      * disposing the request scope behind the stream then fails. That
-     * failure must never suppress the already-written final SSE event,
-     * and a later dispose callback must still run despite an earlier one
+     * failure must never suppress the already-written final SSE event, and
+     * a later dispose callback must still run despite an earlier one
      * throwing.
      */
     public function test_a_streamed_calls_disposal_failure_does_not_suppress_the_final_event(): void
@@ -1282,34 +836,12 @@ final class McpControllerTest extends TestCase
         DisposalRecorder::$secondRan = false;
         DisposalRecorder::$scope = null;
 
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(DisposalFailingToolController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
-        $app->boot();
+        $kernel = $this->kernelWith(DisposalFailingToolController::class);
 
-        $router = new Router();
-        $router->register(McpController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'disposal_failing_tool', '_meta' => ['progressToken' => 'tok']],
-        ]);
-
-        $response = $kernel->handle($request);
+        $response = $kernel->handle($this->disposalFailingCall());
         self::assertInstanceOf(StreamedResponse::class, $response);
 
-        ob_start();
-        ob_start();
-        ($response->getEmitter())();
-        ob_end_clean();
-        $output = ob_get_clean();
-
-        $events = array_values(array_filter(explode("\n\n", trim($output))));
+        $events = $this->emit($response);
 
         self::assertCount(1, $events, 'exactly one SSE event — the disposal failure must never appear as a second one');
         $final = json_decode(substr($events[0], strlen('data: ')), true);
@@ -1325,33 +857,14 @@ final class McpControllerTest extends TestCase
     {
         $logger = new InMemoryLogger();
 
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
+        $app = $this->appWith(DisposalFailingToolController::class);
         $app->instance(LoggerInterface::class, $logger);
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(DisposalFailingToolController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
         $app->boot();
 
-        $router = new Router();
-        $router->register(McpController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'disposal_failing_tool', '_meta' => ['progressToken' => 'tok']],
-        ]);
-
-        $response = $kernel->handle($request);
+        $response = $this->kernelFor($app)->handle($this->disposalFailingCall());
         self::assertInstanceOf(StreamedResponse::class, $response);
 
-        ob_start();
-        ob_start();
-        ($response->getEmitter())();
-        ob_end_clean();
-        ob_get_clean();
+        $this->emit($response);
 
         self::assertCount(1, $logger->records);
         self::assertSame('error', $logger->records[0]['level']);
@@ -1360,50 +873,30 @@ final class McpControllerTest extends TestCase
 
     /**
      * SafeLogger::log($app->get(LoggerInterface::class), ...) is not
-     * actually safe on its own: PHP evaluates that get() call before
-     * log() is ever entered, so a throwing LoggerInterface binding
-     * escapes uncaught right where the stream lease's own resolution
-     * happens — suppressing the already-written final event and aborting
-     * the stream. This proves it doesn't.
+     * actually safe on its own: PHP evaluates that get() call before log()
+     * is ever entered, so a throwing LoggerInterface binding escapes
+     * uncaught right where the stream lease's own resolution happens —
+     * suppressing the already-written final event and aborting the stream.
+     * This proves it does not.
      *
-     * $succeeds: 1 is the number of LoggerInterface resolutions this
-     * real request path makes before the lease's own —
+     * $succeeds: 1 is the number of LoggerInterface resolutions this real
+     * request path makes before the lease's own —
      * ExceptionHandlerMiddleware's construction. If this test starts
      * failing because it never reaches the streamed event at all, that
      * count is the first thing to re-check.
      */
     public function test_a_streamed_calls_final_event_survives_even_when_the_logger_itself_cannot_be_resolved(): void
     {
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
+        $app = $this->appWith(DisposalFailingToolController::class);
         $loggerFactory = new ThrowsAfterFirstResolutionLogger(succeeds: 1);
         $app->bind(LoggerInterface::class, $loggerFactory(...), shared: false);
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(DisposalFailingToolController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
         $app->boot();
 
-        $router = new Router();
-        $router->register(McpController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'disposal_failing_tool', '_meta' => ['progressToken' => 'tok']],
-        ]);
-
-        $response = $kernel->handle($request);
+        $response = $this->kernelFor($app)->handle($this->disposalFailingCall());
         self::assertInstanceOf(StreamedResponse::class, $response);
 
-        ob_start();
-        ob_start();
-        ($response->getEmitter())();
-        ob_end_clean();
-        $output = ob_get_clean();
+        $events = $this->emit($response);
 
-        $events = array_values(array_filter(explode("\n\n", trim($output))));
         self::assertCount(1, $events, 'the final event survives even though the logger itself could not be resolved to report the disposal failure');
         $final = json_decode(substr($events[0], strlen('data: ')), true);
         self::assertSame(1, $final['id']);
@@ -1413,15 +906,14 @@ final class McpControllerTest extends TestCase
     /**
      * A genuine output failure, not a manufactured one: PHP invokes an
      * ob_start() handler callback whenever its buffer is flushed, and a
-     * callback that throws makes ob_flush() itself throw — write()'s own
-     * `@ob_flush()` suppresses PHP warnings, not a real thrown exception,
-     * so this reaches the exact code path a broken/closed output stream
-     * would. Proves the real output failure propagates as the primary
-     * failure, the request scope behind the stream is still fully
-     * disposed (every dispose callback attempted, including a
-     * simultaneous disposal failure — contained and logged separately,
-     * not instead), and the one failed write attempt is never retried or
-     * duplicated.
+     * callback that throws makes ob_flush() itself throw — the emitter's
+     * own `@ob_flush()` suppresses PHP warnings, not a real thrown
+     * exception, so this reaches the exact code path a broken or closed
+     * output stream would. Proves the real output failure propagates as
+     * the primary failure, the request scope behind the stream is still
+     * fully disposed (every dispose callback attempted, including a
+     * simultaneous disposal failure — contained and logged separately, not
+     * instead), and the one failed write attempt is never retried.
      */
     public function test_an_output_failure_still_disposes_the_scope_and_runs_every_callback(): void
     {
@@ -1430,26 +922,11 @@ final class McpControllerTest extends TestCase
 
         $logger = new InMemoryLogger();
 
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
+        $app = $this->appWith(DisposalFailingToolController::class);
         $app->instance(LoggerInterface::class, $logger);
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(DisposalFailingToolController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
         $app->boot();
 
-        $router = new Router();
-        $router->register(McpController::class);
-        $kernel = new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
-
-        $request = $this->mcpRequest([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/call',
-            'params' => ['name' => 'disposal_failing_tool', '_meta' => ['progressToken' => 'tok']],
-        ]);
-
-        $response = $kernel->handle($request);
+        $response = $this->kernelFor($app)->handle($this->disposalFailingCall());
         self::assertInstanceOf(StreamedResponse::class, $response);
 
         // PHPUnit's own runner may already have output buffering active,
@@ -1471,11 +948,10 @@ final class McpControllerTest extends TestCase
         } catch (Throwable $e) {
             $threw = $e;
         } finally {
-            // The throwing handler's own buffer level is left un-popped
-            // by the failed flush — pop every level back down to this
-            // test's own outer capture regardless of what surfaces, so
-            // this test can't leak buffer state into whatever PHPUnit
-            // runs next.
+            // The throwing handler's own buffer level is left un-popped by
+            // the failed flush — pop every level back down to this test's
+            // own outer capture regardless of what surfaces, so this test
+            // cannot leak buffer state into whatever PHPUnit runs next.
             while (ob_get_level() > $baseLevel + 1) {
                 @ob_end_clean();
             }
@@ -1494,59 +970,162 @@ final class McpControllerTest extends TestCase
         self::assertSame('dispose callback failed', $logger->records[0]['context']['message']);
     }
 
+    // --- Fixtures. ---
+
     /**
-     * The endpoint with an empty registry — protocol-level tests that
-     * need no tools at all.
+     * A Kernel with the /mcp route registered the way discovery would
+     * register it in a real application: McpController as an ordinary
+     * controller, the `mcp` middleware group carrying the origin check,
+     * and the shared server bound on AppScope the way this package's
+     * bootstrap binds it.
+     *
+     * @param list<class-string> $extraGroupMiddleware appended to the mcp group after the origin check
+     * @param array<string, string> $config
      */
+    private function mcpEnabledKernel(array $extraGroupMiddleware = [], array $config = []): Kernel
+    {
+        $app = $this->appWith(AccountController::class, $config);
+        $app->boot();
+
+        $router = new Router();
+        $router->register(UserController::class);
+        $router->register(McpController::class);
+
+        return new Kernel(
+            $app,
+            $router,
+            middlewareGroups: ['mcp' => [McpOriginMiddleware::class, ...$extraGroupMiddleware]],
+        );
+    }
+
+    private function mcpToolsListRequest(): ServerRequest
+    {
+        return $this->mcpRequest(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list']);
+    }
+
+    /**
+     * The same shape as mcpEnabledKernel(), registering
+     * ThrowingResourceController against a server whose adapter logs
+     * through the given logger.
+     */
+    private function mcpEnabledKernelWithThrowingResource(ThrowingLogger $logger): Kernel
+    {
+        $app = new AppScope();
+        $app->instance(Config::class, new Config([]));
+        $registry = new McpRegistry();
+        $registry->register(ThrowingResourceController::class);
+        $app->instance(McpServer::class, new McpServer(
+            new ServerInfo('Kinetis', '1.0.0'),
+            new KinetisMcpApplication($registry, new McpDispatcher($app), $logger),
+        ));
+        $app->boot();
+
+        return $this->kernelFor($app);
+    }
+
+    /** The endpoint with an empty registry — protocol tests needing no tools. */
     private function emptyMcpKernel(): Kernel
     {
         $app = new AppScope();
         $app->instance(Config::class, new Config([]));
-        $app->instance(McpServer::class, new McpServer(new McpRegistry(), new McpDispatcher($app)));
+        $app->instance(McpServer::class, new McpServer(
+            new ServerInfo('Kinetis', '1.0.0'),
+            new KinetisMcpApplication(new McpRegistry(), new McpDispatcher($app)),
+        ));
         $app->boot();
 
-        $router = new Router();
-        $router->register(McpController::class);
+        return $this->kernelFor($app);
+    }
 
-        return new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
+    private function progressMcpKernel(): Kernel
+    {
+        return $this->kernelWith(ProgressReportingController::class);
     }
 
     /**
+     * @param class-string $controller
+     * @param array<string, list<class-string>>|null $middlewareGroups
+     */
+    private function kernelWith(string $controller, ?array $middlewareGroups = null): Kernel
+    {
+        $app = $this->appWith($controller);
+        $app->boot();
+
+        return $this->kernelFor($app, $middlewareGroups);
+    }
+
+    /**
+     * @param class-string $controller
      * @param array<string, string> $config
      */
-    private function progressMcpKernel(array $config = []): Kernel
+    private function appWith(string $controller, array $config = []): AppScope
     {
         $app = new AppScope();
         $app->instance(Config::class, new Config($config));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(ProgressReportingController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
-        $app->boot();
+        $registry = new McpRegistry();
+        $registry->register($controller);
+        $app->instance(McpServer::class, new McpServer(
+            new ServerInfo('Kinetis', '1.0.0'),
+            new KinetisMcpApplication($registry, new McpDispatcher($app)),
+        ));
 
-        $router = new Router();
-        $router->register(McpController::class);
-
-        return new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
+        return $app;
     }
 
     /**
-     * A separate registry (ProgressNotificationToolController rather than
-     * ProgressReportingController) purely so this file's own
-     * NotificationExecutionRecorder-observing test doesn't share a
-     * registered tool with every other progress test here.
+     * @param array<string, list<class-string>>|null $middlewareGroups
      */
-    private function progressNotificationMcpKernel(): Kernel
+    private function kernelFor(AppScope $app, ?array $middlewareGroups = null): Kernel
     {
-        $app = new AppScope();
-        $app->instance(Config::class, new Config([]));
-        $mcpRegistry = new McpRegistry();
-        $mcpRegistry->register(ProgressNotificationToolController::class);
-        $app->instance(McpServer::class, new McpServer($mcpRegistry, new McpDispatcher($app)));
-        $app->boot();
-
         $router = new Router();
         $router->register(McpController::class);
 
-        return new Kernel($app, $router, middlewareGroups: ['mcp' => [McpOriginMiddleware::class]]);
+        return new Kernel($app, $router, middlewareGroups: $middlewareGroups ?? ['mcp' => [McpOriginMiddleware::class]]);
+    }
+
+    private function disposalFailingCall(): ServerRequest
+    {
+        return $this->mcpRequest([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'tools/call',
+            'params' => ['name' => 'disposal_failing_tool', '_meta' => ['progressToken' => 'tok']],
+        ]);
+    }
+
+    /**
+     * The emitter itself calls ob_flush()/flush() to push each chunk out
+     * immediately — a single ob_start() here would have those calls push
+     * straight to real stdout instead of accumulating. Nesting a second
+     * buffer lets the emitter's own flushes land in the outer one, which is
+     * then read back.
+     *
+     * @return list<string>
+     */
+    private function emit(StreamedResponse $response): array
+    {
+        ob_start();
+        ob_start();
+        ($response->getEmitter())();
+        ob_end_clean();
+        $output = (string) ob_get_clean();
+
+        return array_values(array_filter(explode("\n\n", trim($output))));
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function toolResult(ResponseInterface $response): array
+    {
+        if ($response instanceof StreamedResponse) {
+            $events = $this->emit($response);
+            $final = json_decode(substr((string) end($events), strlen('data: ')), true);
+        } else {
+            self::assertSame(200, $response->getStatusCode());
+            $final = json_decode((string) $response->getBody(), true);
+        }
+
+        return json_decode($final['result']['content'][0]['text'], true);
     }
 }

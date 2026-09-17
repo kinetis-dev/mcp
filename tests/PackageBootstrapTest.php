@@ -6,11 +6,10 @@ namespace Kinetis\Mcp\Tests;
 
 use Kinetis\Config\Config;
 use Kinetis\Container\AppScope;
-use Kinetis\Mcp\JsonObject;
 use Kinetis\Mcp\McpRegistry;
-use Kinetis\Mcp\McpServer;
 use Kinetis\Mcp\PackageBootstrap;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
+use Kinetis\McpProtocol\McpServer;
 use PHPUnit\Framework\TestCase;
 
 final class PackageBootstrapTest extends TestCase
@@ -32,18 +31,35 @@ final class PackageBootstrapTest extends TestCase
         $server = $app->get(McpServer::class);
         self::assertInstanceOf(McpServer::class, $server);
 
-        $response = $server->handle([
-            'jsonrpc' => '2.0',
-            'id' => 1,
-            'method' => 'tools/list',
-            'params' => ['_meta' => [
-                'io.modelcontextprotocol/protocolVersion' => '2026-07-28',
-                'io.modelcontextprotocol/clientCapabilities' => new JsonObject([]),
-            ]],
-        ]);
+        $response = $server->handle(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'tools/list']);
 
         self::assertNotNull($response);
         $names = array_column($response['result']['tools'], 'name');
         self::assertContains('create_user', $names);
+    }
+
+    public function test_the_bound_server_names_kinetis_on_initialize(): void
+    {
+        $app = new AppScope();
+        $app->instance(McpRegistry::class, new McpRegistry());
+        new PackageBootstrap()->register($app, new Config([]));
+        $app->boot();
+
+        /** @var McpServer $server */
+        $server = $app->get(McpServer::class);
+
+        $response = $server->handle([
+            'jsonrpc' => '2.0',
+            'id' => 1,
+            'method' => 'initialize',
+            'params' => ['protocolVersion' => '2025-06-18', 'capabilities' => (object) [], 'clientInfo' => (object) [
+                'name' => 'probe',
+                'version' => '1.0',
+            ]],
+        ]);
+
+        self::assertNotNull($response);
+        self::assertSame('2025-06-18', $response['result']['protocolVersion']);
+        self::assertSame('Kinetis', $response['result']['serverInfo']['name']);
     }
 }
