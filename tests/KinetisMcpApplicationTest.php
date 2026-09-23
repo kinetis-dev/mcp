@@ -10,6 +10,7 @@ use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\InMemoryLogger;
+use Kinetis\Mcp\Tests\Fixtures\RefusingToolController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingResourceController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingToolController;
 use Kinetis\Mcp\Tests\Fixtures\TypedListToolController;
@@ -110,6 +111,18 @@ final class KinetisMcpApplicationTest extends TestCase
         self::assertSame('Tool execution failed.', $response['result']['content'][0]['text']);
         self::assertStringNotContainsString('hunter2', json_encode($response, JSON_THROW_ON_ERROR));
         self::assertCount(1, $logger->records);
+    }
+
+    public function test_a_returned_tool_result_reaches_the_client_as_built_and_is_not_logged(): void
+    {
+        $logger = new InMemoryLogger();
+        $response = $this->serverFor(RefusingToolController::class, $logger)
+            ->handle($this->call(1, 'refuse', '{}'));
+
+        self::assertNotNull($response);
+        self::assertTrue($response['result']['isError']);
+        self::assertSame([['type' => 'text', 'text' => 'Denied.']], $response['result']['content']);
+        self::assertCount(0, $logger->records);
     }
 
     public function test_an_unexpected_resource_failure_is_a_generic_protocol_error_and_logged(): void

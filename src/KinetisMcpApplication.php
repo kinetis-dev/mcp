@@ -32,10 +32,15 @@ use Throwable;
  * that is not a container is ignored, and the dispatcher's own container
  * is used instead.
  *
+ * A tool's return value is JSON-encoded as a successful text result,
+ * except a ToolResult, which is returned as the tool built it: that is how
+ * a tool reports a deliberate refusal, with text it has already made safe
+ * for the client.
+ *
  * A tool or resource *executing* and failing is reported as a normal MCP
  * result with `isError: true` or, for a read, as a generic protocol error.
  * A failed validation keeps its real violations, which is the argument
- * feedback an agent retries on. Any other failure gets a fixed message and
+ * feedback an agent retries on. Any other exception gets a fixed message and
  * the real exception goes to the logger — its text can carry SQL, a path
  * or a credential, the same client-facing/logged split
  * ExceptionHandlerMiddleware applies to an HTTP 500.
@@ -99,15 +104,16 @@ final readonly class KinetisMcpApplication implements McpApplication
         }
 
         try {
-            return ToolResult::text(json_encode(
-                $this->dispatcher->callTool(
-                    $tool,
-                    $this->hydrationArguments($arguments),
-                    new ProgressReporter($progress),
-                    self::container($context),
-                ),
-                JSON_THROW_ON_ERROR,
-            ));
+            $result = $this->dispatcher->callTool(
+                $tool,
+                $this->hydrationArguments($arguments),
+                new ProgressReporter($progress),
+                self::container($context),
+            );
+
+            return $result instanceof ToolResult
+                ? $result
+                : ToolResult::text(json_encode($result, JSON_THROW_ON_ERROR));
         } catch (ValidationException $e) {
             // The failure's own violations: the same ordered path/code/
             // message/parameters objects the HTTP renderer puts in its
