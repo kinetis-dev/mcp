@@ -13,11 +13,18 @@ use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\ConstrainedArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableDtoArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
+use Kinetis\Mcp\Tests\Fixtures\ObjectMapArgumentToolController;
+use Kinetis\Mcp\Tests\Fixtures\ObjectMapListOfToolController;
+use Kinetis\Mcp\Tests\Fixtures\ObjectMapOnAStringToolController;
 use Kinetis\Mcp\Tests\Fixtures\ProgressReportingController;
 use Kinetis\Mcp\Tests\Fixtures\UnionArgumentToolController;
 use Kinetis\Mcp\ToolDefinition;
 use Kinetis\Validation\Exception\JsonSchemaException;
+use Kinetis\Validation\Exception\UnsupportedDtoDefinitionException;
 use Kinetis\Validation\Exception\ValidationException;
+use Kinetis\Validation\JsonObject;
+use Kinetis\Validation\JsonTree;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 final class McpDispatcherTest extends TestCase
@@ -412,6 +419,7 @@ final class McpDispatcherTest extends TestCase
             'isProgressReporter' => false,
             'dtoClass' => null,
             'scalarType' => 'int',
+            'objectMap' => false,
             'hasDefault' => false,
             'defaultValue' => null,
             'allowsNull' => false,
@@ -533,5 +541,134 @@ final class McpDispatcherTest extends TestCase
             self::assertSame(['progress'], $e->violations[0]->path);
             self::assertSame('unexpected_field', $e->violations[0]->code);
         }
+    }
+
+    /**
+     * The inputSchema publishes an #[ObjectMap] argument as an open JSON
+     * object, and a real one binds as the plain array the method
+     * declares, nested objects included.
+     */
+    public function test_an_object_map_argument_binds_a_json_object_as_a_plain_array(): void
+    {
+        $tool = $this->objectMapTool();
+
+        self::assertSame(['type' => 'object', 'additionalProperties' => true], $tool->inputSchema['properties']['meta']);
+        self::assertSame(['meta'], $tool->inputSchema['required']);
+
+        $result = $this->dispatcher()->callTool(
+            $tool,
+            self::jsonArguments('{"meta": {"locale": "en", "prefs": {"theme": "dark"}, "tags": ["a"], "empty": {}}}'),
+        );
+
+        self::assertSame(
+            ['meta' => ['locale' => 'en', 'prefs' => ['theme' => 'dark'], 'tags' => ['a'], 'empty' => []]],
+            $result,
+        );
+    }
+
+    public function test_a_json_array_for_an_object_map_argument_is_rejected_on_its_path(): void
+    {
+        try {
+            $this->dispatcher()->callTool($this->objectMapTool(), self::jsonArguments('{"meta": ["a", "b"]}'));
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertCount(1, $e->violations);
+            self::assertSame(['meta'], $e->violations[0]->path);
+            self::assertSame('not_a_json_object', $e->violations[0]->code);
+        }
+    }
+
+    public function test_a_hand_built_object_map_plan_matches_and_binds_like_the_live_one(): void
+    {
+        $plan = [[
+            'name' => 'meta',
+            'isProgressReporter' => false,
+            'dtoClass' => null,
+            'scalarType' => 'array',
+            'objectMap' => true,
+            'hasDefault' => false,
+            'defaultValue' => null,
+            'allowsNull' => false,
+            'constraints' => [],
+        ]];
+
+        self::assertSame($plan, McpDispatcher::derivePlan(new \ReflectionMethod(ObjectMapArgumentToolController::class, 'run')));
+
+        $app = new AppScope();
+        $app->boot();
+        $compiled = new McpDispatcher($app, [ObjectMapArgumentToolController::class . '::run' => $plan]);
+        $tool = $this->objectMapTool();
+
+        self::assertSame(
+            ['meta' => ['prefs' => ['theme' => 'dark']]],
+            $compiled->callTool($tool, self::jsonArguments('{"meta": {"prefs": {"theme": "dark"}}}')),
+        );
+
+        try {
+            $compiled->callTool($tool, self::jsonArguments('{"meta": []}'));
+            self::fail('Expected a ValidationException.');
+        } catch (ValidationException $e) {
+            self::assertSame(['meta'], $e->violations[0]->path);
+            self::assertSame('not_a_json_object', $e->violations[0]->code);
+        }
+    }
+
+    /**
+     * @param class-string $controller
+     */
+    #[DataProvider('invalidObjectMapToolProvider')]
+    public function test_an_invalid_object_map_declaration_is_refused_at_registration(string $controller, string $message): void
+    {
+        $this->expectException(UnsupportedDtoDefinitionException::class);
+        $this->expectExceptionMessage($message);
+
+        new McpRegistry()->register($controller);
+    }
+
+    /**
+     * @param class-string $controller
+     */
+    #[DataProvider('invalidObjectMapToolProvider')]
+    public function test_an_invalid_object_map_declaration_is_refused_by_derive_plan(string $controller, string $message): void
+    {
+        $this->expectException(UnsupportedDtoDefinitionException::class);
+        $this->expectExceptionMessage($message);
+
+        McpDispatcher::derivePlan(new \ReflectionMethod($controller, 'run'));
+    }
+
+    /**
+     * @return array<string, array{class-string, string}>
+     */
+    public static function invalidObjectMapToolProvider(): array
+    {
+        return [
+            'non-array type' => [ObjectMapOnAStringToolController::class, '#[ObjectMap] only applies to a parameter typed array.'],
+            'with #[ListOf]' => [ObjectMapListOfToolController::class, '#[ObjectMap] admits a JSON object and #[ListOf] a JSON array'],
+        ];
+    }
+
+    private function objectMapTool(): ToolDefinition
+    {
+        $registry = new McpRegistry();
+        $registry->register(ObjectMapArgumentToolController::class);
+        $tool = $registry->findTool('object_map_argument');
+        self::assertNotNull($tool);
+
+        return $tool;
+    }
+
+    /**
+     * A tool call's arguments as the MCP application hands them over:
+     * the top-level members, with every nested JSON object still marked.
+     *
+     * @return array<string, mixed>
+     */
+    private static function jsonArguments(string $json): array
+    {
+        $converted = JsonTree::convert(json_decode($json, associative: false, flags: JSON_THROW_ON_ERROR));
+        self::assertInstanceOf(JsonObject::class, $converted);
+
+        return $converted->toArray();
     }
 }

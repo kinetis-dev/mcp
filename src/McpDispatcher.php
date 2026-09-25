@@ -7,6 +7,7 @@ namespace Kinetis\Mcp;
 use Kinetis\Instrumentation\Telemetry;
 use Kinetis\Validation\Constraint;
 use Kinetis\Validation\Exception\JsonSchemaException;
+use Kinetis\Validation\Exception\UnsupportedDtoDefinitionException;
 use Kinetis\Validation\Exception\ValidationException;
 use Kinetis\Validation\Hydrator;
 use Kinetis\Validation\InputSource;
@@ -54,6 +55,7 @@ use ReflectionNamedType;
  *     isProgressReporter: bool,
  *     dtoClass: ?string,
  *     scalarType: ?string,
+ *     objectMap: bool,
  *     hasDefault: bool,
  *     defaultValue: mixed,
  *     allowsNull: bool,
@@ -145,8 +147,14 @@ final class McpDispatcher
      * progress-reporting tool, reintroducing exactly the per-call reflection
      * cost this exists to remove.
      *
+     * `objectMap` is Hydrator::objectMap()'s answer, the same one the
+     * tool's inputSchema is published from, so an #[ObjectMap] argument
+     * binds as the JSON object its schema advertises and a declaration
+     * Hydrator refuses is refused here in the same words.
+     *
      * @return list<McpBindingPlanParameter>
      * @throws JsonSchemaException
+     * @throws UnsupportedDtoDefinitionException
      */
     public static function derivePlan(ReflectionMethod $method): array
     {
@@ -169,13 +177,15 @@ final class McpDispatcher
                     ? $type->getName()
                     : null,
                 'scalarType' => $type !== null && $type->isBuiltin() ? $type->getName() : null,
+                'objectMap' => Hydrator::objectMap($parameter, $type),
                 'hasDefault' => $hasDefault,
                 'defaultValue' => $hasDefault ? $parameter->getDefaultValue() : null,
                 // An untyped parameter accepts anything, null included.
                 'allowsNull' => $type === null || $type->allowsNull(),
-                // Only meaningful for a scalar argument — a DTO-typed
-                // one carries its own fields' rules inside its hydration
-                // plan, exactly as an HTTP #[Body] parameter does.
+                // Only meaningful for a scalar or object-map argument —
+                // a DTO-typed one carries its own fields' rules inside
+                // its hydration plan, exactly as an HTTP #[Body]
+                // parameter does.
                 'constraints' => Hydrator::collectConstraints($parameter),
             ];
         }
@@ -264,7 +274,10 @@ final class McpDispatcher
      * violations, so a wrong-shaped argument carries the identical path,
      * code and message it would carry over HTTP — and a
      * #[GreaterThan]/#[In] a tool's inputSchema publishes is a rule the
-     * call is actually checked against.
+     * call is actually checked against. An #[ObjectMap] argument enters
+     * Hydrator::resolveObjectMap() instead, the path a #[Body] DTO's
+     * #[ObjectMap] field takes, so it binds only a real JSON object and
+     * reaches the method as a plain array.
      *
      * A DTO-typed argument takes the branch below, which answers the
      * same questions in the same order for an object-shaped value: null
@@ -327,14 +340,16 @@ final class McpDispatcher
             ]);
         }
 
-        [$resolved, $violations] = Hydrator::resolveScalar(
-            InputSource::Json,
-            [$param['name']],
-            $value,
-            $param['scalarType'],
-            $param['allowsNull'],
-            $param['constraints'],
-        );
+        [$resolved, $violations] = $param['objectMap']
+            ? Hydrator::resolveObjectMap([$param['name']], $value, $param['allowsNull'], $param['constraints'])
+            : Hydrator::resolveScalar(
+                InputSource::Json,
+                [$param['name']],
+                $value,
+                $param['scalarType'],
+                $param['allowsNull'],
+                $param['constraints'],
+            );
 
         if ($violations !== []) {
             throw ValidationException::fromViolations($violations);
