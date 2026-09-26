@@ -18,7 +18,7 @@ final class PackageBootstrapTest extends TestCase
     {
         // McpRegistry is never discovered here — this proves PackageBootstrap
         // genuinely resolves it from the container (the framework's own
-        // PluginDiscovery::bind() call, in real use) rather than
+        // PluginDiscovery::bindInstances() call, in real use) rather than
         // rediscovering it itself.
         $registry = new McpRegistry();
         $registry->register(AccountController::class);

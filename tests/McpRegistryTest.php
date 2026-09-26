@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kinetis\Mcp\Tests;
 
 use Kinetis\Cache\CacheableDiscoveryInterface;
+use Kinetis\Cache\DiscoveryContext;
 use Kinetis\Cache\Exception\CacheArtifactExceptionInterface;
 use Kinetis\Cache\Exception\InvalidCacheArtifactException;
 use Kinetis\Cache\CacheStore;
@@ -398,7 +399,7 @@ final class McpRegistryTest extends TestCase
 
     public function test_compile_delegates_to_discovery_and_reduces_it_to_plain_data(): void
     {
-        $data = McpRegistry::compile(__DIR__ . '/Fixtures/Project');
+        $data = McpRegistry::compile(new DiscoveryContext(__DIR__ . '/Fixtures/Project'));
 
         $reloaded = McpRegistry::fromArray($data);
 

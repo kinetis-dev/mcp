@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\Mcp\Tests\Console;
 
+use Kinetis\Cache\DiscoveryContext;
 use Kinetis\Container\AppScope;
 use Kinetis\Mcp\Console\McpServeCommand;
 use Kinetis\Mcp\KinetisMcpApplication;
@@ -123,7 +124,7 @@ final class McpServeCommandTest extends TestCase
         $projectRoot = $this->projectRoot;
         $app->bind(McpServer::class, static fn ($c): McpServer => new McpServer(
             new ServerInfo('Kinetis', '1.0.0'),
-            new KinetisMcpApplication(McpDiscovery::discover($projectRoot), new McpDispatcher($c)),
+            new KinetisMcpApplication(McpDiscovery::discover(new DiscoveryContext($projectRoot)), new McpDispatcher($c)),
         ));
         $app->boot();
 

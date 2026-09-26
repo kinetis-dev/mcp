@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\Mcp\Tests;
 
+use Kinetis\Cache\DiscoveryContext;
 use Kinetis\Mcp\McpDiscovery;
 use PHPUnit\Framework\TestCase;
 
@@ -22,7 +23,7 @@ final class McpDiscoveryTest extends TestCase
 
     public function test_discovers_a_projects_own_tools_anywhere_under_its_psr4_root(): void
     {
-        $registry = McpDiscovery::discover($this->fixtureProject());
+        $registry = McpDiscovery::discover(new DiscoveryContext($this->fixtureProject()));
 
         self::assertNotNull($registry->findTool('discovered_ping'));
         self::assertNotNull($registry->findTool('unconventional_ping'));
@@ -30,7 +31,7 @@ final class McpDiscoveryTest extends TestCase
 
     public function test_paths_restricts_the_project_wide_scan(): void
     {
-        $registry = McpDiscovery::discover($this->fixtureProject(), ['Mcp']);
+        $registry = McpDiscovery::discover(new DiscoveryContext($this->fixtureProject()), ['Mcp']);
 
         self::assertNotNull($registry->findTool('discovered_ping'));
         self::assertNull($registry->findTool('unconventional_ping'));
@@ -41,7 +42,7 @@ final class McpDiscoveryTest extends TestCase
         putenv('MCP_DISCOVERY_PATHS=Mcp');
 
         try {
-            $registry = McpDiscovery::discover($this->fixtureProject());
+            $registry = McpDiscovery::discover(new DiscoveryContext($this->fixtureProject()));
 
             self::assertNotNull($registry->findTool('discovered_ping'));
             self::assertNull($registry->findTool('unconventional_ping'));
@@ -55,7 +56,7 @@ final class McpDiscoveryTest extends TestCase
         putenv('MCP_DISCOVERY_PATHS=DoesNotExist');
 
         try {
-            $registry = McpDiscovery::discover($this->fixtureProject(), []);
+            $registry = McpDiscovery::discover(new DiscoveryContext($this->fixtureProject()), []);
 
             self::assertNotNull($registry->findTool('discovered_ping'));
             self::assertNotNull($registry->findTool('unconventional_ping'));

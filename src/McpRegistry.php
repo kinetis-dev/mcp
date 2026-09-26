@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kinetis\Mcp;
 
 use Kinetis\Cache\CacheableDiscoveryInterface;
+use Kinetis\Cache\DiscoveryContext;
 use Kinetis\Cache\Exception\ArtifactValidation;
 use Kinetis\Cache\Exception\CacheArtifactExceptionInterface;
 use Kinetis\Cache\Exception\InvalidCacheArtifactException;
@@ -209,9 +210,9 @@ final class McpRegistry implements CacheableDiscoveryInterface
      * `fromArray()` below already satisfies the other half.
      */
     #[\Override]
-    public static function compile(string $projectRoot): array
+    public static function compile(DiscoveryContext $context): array
     {
-        return McpDiscovery::discover($projectRoot)->toArray();
+        return McpDiscovery::discover($context)->toArray();
     }
 
     /**

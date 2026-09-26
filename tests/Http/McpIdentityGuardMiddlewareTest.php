@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kinetis\Mcp\Tests\Http;
 
 use Kinetis\Cache\Compiler;
+use Kinetis\Cache\DiscoveryContext;
 use Kinetis\Cache\HttpCache;
 use Kinetis\Config\Config;
 use Kinetis\Config\Exception\InvalidConfigValueException;
@@ -397,7 +398,7 @@ final class McpIdentityGuardMiddlewareTest extends TestCase
      */
     private function discoveredGroup(): array
     {
-        $groups = GlobalMiddlewareDiscovery::discoverAll(dirname(__DIR__) . '/Fixtures/GroupOrderProject')['groups'];
+        $groups = GlobalMiddlewareDiscovery::discoverAll(new DiscoveryContext(dirname(__DIR__) . '/Fixtures/GroupOrderProject'))['groups'];
 
         return $groups['mcp'];
     }

@@ -4,8 +4,7 @@ declare(strict_types=1);
 
 namespace Kinetis\Mcp;
 
-use Kinetis\Cache\NamespaceScanner;
-use Kinetis\Cache\PackageDiscovery;
+use Kinetis\Cache\DiscoveryContext;
 
 /**
  * Builds a McpRegistry from every class found in a project — no
@@ -28,14 +27,14 @@ final class McpDiscovery
     /**
      * @param list<string>|null $paths
      */
-    public static function discover(string $projectRoot, ?array $paths = null): McpRegistry
+    public static function discover(DiscoveryContext $context, ?array $paths = null): McpRegistry
     {
         $registry = new McpRegistry();
 
         // Deduped across both passes purely to avoid redundant reflection
         // work: when the project root and framework root are the same
         // repository, a class under Kinetis\Mcp can surface from both
-        // classesInProject() and classesUnderFrameworkSegment(), and
+        // projectClasses() and frameworkClasses(), and
         // without this it would be reflected twice in the same discover()
         // call. Correctness never depends on this set — McpRegistry::register()
         // is idempotent per class on its own (a class already registered is
@@ -45,9 +44,9 @@ final class McpDiscovery
         $seen = [];
 
         foreach ([
-            ...NamespaceScanner::classesInProject($projectRoot, $paths ?? self::pathsFromEnv()),
-            ...NamespaceScanner::classesUnderFrameworkSegment('Mcp'),
-            ...NamespaceScanner::classesUnderPackageRoots(PackageDiscovery::scanRoots($projectRoot)),
+            ...$context->projectClasses($paths ?? self::pathsFromEnv()),
+            ...$context->frameworkClasses('Mcp'),
+            ...$context->packageClasses(),
         ] as $class) {
             if (isset($seen[$class])) {
                 continue;
