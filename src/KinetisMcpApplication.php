@@ -106,7 +106,7 @@ final readonly class KinetisMcpApplication implements McpApplication
         try {
             $result = $this->dispatcher->callTool(
                 $tool,
-                $this->hydrationArguments($arguments),
+                self::hydrationArguments($arguments),
                 new ProgressReporter($progress),
                 self::container($context),
             );
@@ -115,17 +115,7 @@ final readonly class KinetisMcpApplication implements McpApplication
                 ? $result
                 : ToolResult::text(json_encode($result, JSON_THROW_ON_ERROR));
         } catch (ValidationException $e) {
-            // The failure's own violations: the same ordered path/code/
-            // message/parameters objects the HTTP renderer puts in its
-            // problem document, not that document itself, which describes
-            // a response an MCP client never receives. Substituting
-            // invalid UTF-8 rather than throwing on it keeps a constraint
-            // that quotes raw client bytes back from turning argument
-            // feedback into a transport failure carrying no feedback.
-            return ToolResult::error(json_encode(
-                ['errors' => $e->violations],
-                JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE,
-            ));
+            return ToolResult::error(self::validationFeedback($e));
         } catch (Throwable $e) {
             $this->logSafely('Tool "{tool}" threw: {message}', [
                 'tool' => $name,
@@ -166,6 +156,24 @@ final readonly class KinetisMcpApplication implements McpApplication
     }
 
     /**
+     * The argument feedback a failed validation becomes, as the text of an
+     * error result: `{"errors": [...]}`, the failure's own violations — the
+     * same ordered path/code/message/parameters objects the HTTP renderer
+     * puts in its problem document, not that document itself, which
+     * describes a response a tool caller never receives. Substituting
+     * invalid UTF-8 rather than throwing on it keeps a constraint that
+     * quotes raw client bytes back from turning argument feedback into a
+     * failure carrying no feedback.
+     *
+     * Public so an in-process caller of {@see McpDispatcher::callTool()}
+     * reports the identical payload an MCP client receives.
+     */
+    public static function validationFeedback(ValidationException $e): string
+    {
+        return json_encode(['errors' => $e->violations], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE);
+    }
+
+    /**
      * The arguments object as Hydrator needs it: a plain array of members,
      * with every nested JSON object still marked as one.
      *
@@ -178,9 +186,12 @@ final readonly class KinetisMcpApplication implements McpApplication
      * only the top-level marker is unwrapped here, because the dispatcher
      * takes the members themselves.
      *
+     * Public so an in-process caller of {@see McpDispatcher::callTool()}
+     * binds arguments exactly as an MCP call does.
+     *
      * @return array<string, mixed>
      */
-    private function hydrationArguments(stdClass $arguments): array
+    public static function hydrationArguments(stdClass $arguments): array
     {
         $converted = JsonTree::convert($arguments);
 

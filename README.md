@@ -91,14 +91,14 @@ Read from the environment (or `.env`) via `Kinetis\Config`:
 
 ## Installation
 
-```bash
+```sh
 composer require kinetis/mcp
 ```
 
-Requires PHP 8.4 or later and [`kinetis/framework`](https://github.com/kinetis-dev/framework).
-Documentation:
-[kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html)
+Requires PHP 8.4+ and [`kinetis/framework`](https://github.com/kinetis-dev/framework).
+Full documentation:
+[kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
