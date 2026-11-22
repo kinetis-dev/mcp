@@ -95,7 +95,7 @@ Read from the environment (or `.env`) via `Kinetis\Config`:
 composer require kinetis/mcp
 ```
 
-Requires PHP 8.4+ and [`kinetis/framework`](https://github.com/kinetis-dev/framework).
+Requires PHP 8.4 or 8.5 and [`kinetis/framework`](https://github.com/kinetis-dev/framework).
 Full documentation:
 [kinetis.dev/docs/mcp.html](https://kinetis.dev/docs/mcp.html).
 
