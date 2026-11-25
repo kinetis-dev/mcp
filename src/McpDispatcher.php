@@ -56,6 +56,7 @@ use ReflectionNamedType;
  *     dtoClass: ?string,
  *     scalarType: ?string,
  *     objectMap: bool,
+ *     keepObjects: bool,
  *     hasDefault: bool,
  *     defaultValue: mixed,
  *     allowsNull: bool,
@@ -147,10 +148,12 @@ final class McpDispatcher
      * progress-reporting tool, reintroducing exactly the per-call reflection
      * cost this exists to remove.
      *
-     * `objectMap` is Hydrator::objectMap()'s answer, the same one the
-     * tool's inputSchema is published from, so an #[ObjectMap] argument
-     * binds as the JSON object its schema advertises and a declaration
-     * Hydrator refuses is refused here in the same words.
+     * `objectMap` and `keepObjects` are Hydrator::objectMap()'s answer,
+     * the same one the tool's inputSchema is published from, so an
+     * #[ObjectMap] argument binds as the JSON object its schema
+     * advertises, with nested objects kept as stdClass when the
+     * attribute asks for it, and a declaration Hydrator refuses is
+     * refused here in the same words.
      *
      * @return list<McpBindingPlanParameter>
      * @throws JsonSchemaException
@@ -169,6 +172,7 @@ final class McpDispatcher
 
             $isProgressReporter = $type !== null && $type->getName() === ProgressReporter::class;
             $hasDefault = $parameter->isDefaultValueAvailable();
+            $objectMap = Hydrator::objectMap($parameter, $type);
 
             $plan[] = [
                 'name' => $parameter->getName(),
@@ -177,7 +181,8 @@ final class McpDispatcher
                     ? $type->getName()
                     : null,
                 'scalarType' => $type !== null && $type->isBuiltin() ? $type->getName() : null,
-                'objectMap' => Hydrator::objectMap($parameter, $type),
+                'objectMap' => $objectMap !== null,
+                'keepObjects' => $objectMap !== null && $objectMap->keepObjects,
                 'hasDefault' => $hasDefault,
                 'defaultValue' => $hasDefault ? $parameter->getDefaultValue() : null,
                 // An untyped parameter accepts anything, null included.
@@ -277,7 +282,7 @@ final class McpDispatcher
      * call is actually checked against. An #[ObjectMap] argument enters
      * Hydrator::resolveObjectMap() instead, the path a #[Body] DTO's
      * #[ObjectMap] field takes, so it binds only a real JSON object and
-     * reaches the method as a plain array.
+     * reaches the method as an array of its members.
      *
      * A DTO-typed argument takes the branch below, which answers the
      * same questions in the same order for an object-shaped value: null
@@ -341,7 +346,7 @@ final class McpDispatcher
         }
 
         [$resolved, $violations] = $param['objectMap']
-            ? Hydrator::resolveObjectMap([$param['name']], $value, $param['allowsNull'], $param['constraints'])
+            ? Hydrator::resolveObjectMap([$param['name']], $value, $param['allowsNull'], $param['keepObjects'], $param['constraints'])
             : Hydrator::resolveScalar(
                 InputSource::Json,
                 [$param['name']],

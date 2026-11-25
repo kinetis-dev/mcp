@@ -13,6 +13,7 @@ use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\ConstrainedArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableDtoArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\NullableFieldsToolController;
+use Kinetis\Mcp\Tests\Fixtures\KeptObjectMapToolController;
 use Kinetis\Mcp\Tests\Fixtures\ObjectMapArgumentToolController;
 use Kinetis\Mcp\Tests\Fixtures\ObjectMapListOfToolController;
 use Kinetis\Mcp\Tests\Fixtures\ObjectMapOnAStringToolController;
@@ -420,6 +421,7 @@ final class McpDispatcherTest extends TestCase
             'dtoClass' => null,
             'scalarType' => 'int',
             'objectMap' => false,
+            'keepObjects' => false,
             'hasDefault' => false,
             'defaultValue' => null,
             'allowsNull' => false,
@@ -586,6 +588,7 @@ final class McpDispatcherTest extends TestCase
             'dtoClass' => null,
             'scalarType' => 'array',
             'objectMap' => true,
+            'keepObjects' => false,
             'hasDefault' => false,
             'defaultValue' => null,
             'allowsNull' => false,
@@ -610,6 +613,30 @@ final class McpDispatcherTest extends TestCase
         } catch (ValidationException $e) {
             self::assertSame(['meta'], $e->violations[0]->path);
             self::assertSame('not_a_json_object', $e->violations[0]->code);
+        }
+    }
+
+    public function test_a_keep_objects_plan_records_the_option_and_binds_nested_objects_as_stdclass(): void
+    {
+        $plan = McpDispatcher::derivePlan(new \ReflectionMethod(KeptObjectMapToolController::class, 'create'));
+
+        self::assertTrue($plan[1]['objectMap']);
+        self::assertTrue($plan[1]['keepObjects']);
+
+        $registry = new McpRegistry();
+        $registry->register(KeptObjectMapToolController::class);
+        $tool = $registry->findTool('kept_object_map');
+        self::assertNotNull($tool);
+
+        $app = new AppScope();
+        $app->boot();
+        $arguments = self::jsonArguments('{"resource": "widgets", "values": {"a": {}, "b": [], "c": {"d": {}}}}');
+
+        foreach ([new McpDispatcher($app), new McpDispatcher($app, [KeptObjectMapToolController::class . '::create' => $plan])] as $dispatcher) {
+            $result = $dispatcher->callTool($tool, $arguments);
+
+            self::assertIsArray($result);
+            self::assertSame('{"a":{},"b":[],"c":{"d":{}}}', json_encode($result['values'], JSON_THROW_ON_ERROR));
         }
     }
 

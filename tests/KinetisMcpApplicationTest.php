@@ -10,6 +10,7 @@ use Kinetis\Mcp\McpDispatcher;
 use Kinetis\Mcp\McpRegistry;
 use Kinetis\Mcp\Tests\Fixtures\AccountController;
 use Kinetis\Mcp\Tests\Fixtures\InMemoryLogger;
+use Kinetis\Mcp\Tests\Fixtures\KeptObjectMapToolController;
 use Kinetis\Mcp\Tests\Fixtures\RefusingToolController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingResourceController;
 use Kinetis\Mcp\Tests\Fixtures\ThrowingToolController;
@@ -83,6 +84,35 @@ final class KinetisMcpApplicationTest extends TestCase
         self::assertTrue($object['result']['isError'], 'an object where a list is declared must not hydrate');
         $errors = json_decode($object['result']['content'][0]['text'], true)['errors'];
         self::assertSame(['tags'], $errors[0]['path']);
+    }
+
+    /**
+     * An #[ObjectMap(keepObjects: true)] argument crosses the whole
+     * server with its nested `{}` intact: the tool receives a stdClass,
+     * and its result encodes the arguments exactly as the client sent
+     * them.
+     */
+    public function test_a_keep_objects_argument_reaches_the_tool_with_empty_objects_intact(): void
+    {
+        $values = '{"settings":{"box":{},"tags":[]},"rows":[{}]}';
+        $response = $this->serverFor(KeptObjectMapToolController::class)
+            ->handle($this->call(1, 'kept_object_map', '{"resource":"widgets","values":' . $values . '}'));
+
+        self::assertNotNull($response);
+        self::assertFalse($response['result']['isError']);
+        self::assertSame(
+            '{"values":' . $values . ',"kept":true}',
+            $response['result']['content'][0]['text'],
+        );
+
+        $refused = $this->serverFor(KeptObjectMapToolController::class)
+            ->handle($this->call(2, 'kept_object_map', '{"resource":"widgets","values":[{}]}'));
+
+        self::assertNotNull($refused);
+        self::assertTrue($refused['result']['isError']);
+        $errors = json_decode($refused['result']['content'][0]['text'], true)['errors'];
+        self::assertSame(['values'], $errors[0]['path']);
+        self::assertSame('not_a_json_object', $errors[0]['code']);
     }
 
     /**
